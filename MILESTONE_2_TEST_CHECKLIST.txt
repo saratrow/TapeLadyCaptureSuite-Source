@@ -1,0 +1,40 @@
+MILESTONE 2 ACCEPTANCE CHECKLIST
+================================
+
+SHORT TEST
+----------
+[ ] App opens without crashing
+[ ] FFmpeg says ready
+[ ] EZCAP is automatically selected
+[ ] Correct USB/EZCAP audio device is selected
+[ ] Preview works before recording
+[ ] Record turns status red
+[ ] Preview continues while recording
+[ ] Timer advances
+[ ] File indicator shows recording activity
+[ ] Audio is present in the MP4
+[ ] Picture and audio stay synchronized
+[ ] Pause turns status yellow
+[ ] Resume continues the same job
+[ ] Stop displays "Saving MP4"
+[ ] Final MP4 opens and plays
+[ ] Pause point joins cleanly
+[ ] Filename matches the Tape Label
+[ ] Customer folder is created correctly
+[ ] ArcSoft can use EZCAP after TL Suite closes
+
+LONG TEST BEFORE CUSTOMER USE
+-----------------------------
+[ ] Record an expendable 2-hour tape
+[ ] No application crash
+[ ] MP4 finalizes correctly
+[ ] Beginning, middle, and end all play
+[ ] Audio stays synchronized at the end
+[ ] Dropped-frame count remains acceptable
+[ ] File size is reasonable
+[ ] Computer does not sleep during capture
+
+Notes:
+______________________________________________________________________________
+______________________________________________________________________________
+______________________________________________________________________________
