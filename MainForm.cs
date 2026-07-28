@@ -55,7 +55,7 @@ internal sealed partial class MainForm : Form
 
     public MainForm()
     {
-        Text = "Tape Lady Capture Suite — Milestone 3";
+        Text = "Tape Lady Capture Suite — Milestone 5.2";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(1280, 780);
         Size = new Size(1580, 900);
@@ -177,7 +177,7 @@ internal sealed partial class MainForm : Form
         var version = new Label
         {
             AutoSize = true,
-            Text = "Milestone 3 • Production Workflow",
+            Text = "Milestone 5.2 • Audio Device Detection",
             Font = new Font("Segoe UI", 9F),
             ForeColor = Color.DarkGray,
             Anchor = AnchorStyles.Top | AnchorStyles.Right
@@ -223,7 +223,7 @@ internal sealed partial class MainForm : Form
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 31));
 
         AddBarLabel(panel, "Video", 0);
-        AddBarLabel(panel, "Audio", 2);
+        AddBarLabel(panel, "Audio Source", 2);
         AddBarLabel(panel, "Input", 4);
 
         ConfigureCombo(_videoDeviceCombo);
@@ -573,6 +573,22 @@ internal sealed partial class MainForm : Form
 
         _videoDeviceCombo.SelectionChangeCommitted += async (_, _) =>
         {
+            RefreshAudioSources();
+
+            if (_previewService.IsRunning)
+            {
+                await StartSelectedPreviewAsync();
+            }
+        };
+
+        _inputCombo.SelectionChangeCommitted += async (_, _) =>
+        {
+            if (_videoDeviceCombo.SelectedItem is not CaptureDeviceInfo selected ||
+                selected.Index < 0)
+            {
+                return;
+            }
+
             if (_previewService.IsRunning)
             {
                 await StartSelectedPreviewAsync();
@@ -697,22 +713,60 @@ internal sealed partial class MainForm : Form
         if (_videoDeviceCombo.Items.Count == 0)
         {
             _videoDeviceCombo.Items.Add(
-                new CaptureDeviceInfo(-1, "No video devices found"));
+                new CaptureDeviceInfo(-1, "No video devices found", string.Empty));
         }
 
         SelectPreferredVideoDevice(_videoDeviceCombo, priorVideo);
 
+        RefreshAudioSources(priorAudio);
+    }
+
+    private void RefreshAudioSources(string? previous = null)
+    {
+        previous ??= _audioDeviceCombo.SelectedItem?.ToString();
+
         _audioDeviceCombo.BeginUpdate();
         _audioDeviceCombo.Items.Clear();
-        _audioDeviceCombo.Items.Add("(No audio)");
+        _audioDeviceCombo.Items.Add(new AudioSourceInfo(
+            AudioSourceKind.None,
+            "(No audio)",
+            string.Empty));
 
-        foreach (var device in DeviceService.GetAudioCaptureDevices())
+        if (_videoDeviceCombo.SelectedItem is CaptureDeviceInfo videoDevice &&
+            videoDevice.Index >= 0)
         {
-            _audioDeviceCombo.Items.Add(device);
+            // Do not invent an FFmpeg audio device from a pin label. ArcSoft's
+            // "Audio Pin Source" is a driver control, not necessarily the name
+            // of a DirectShow audio-capture device that FFmpeg can open.
+            // Milestone 5.1 incorrectly combined video=<device>:audio=<device>,
+            // which caused an immediate I/O error on this EZCAP driver.
+        }
+
+        var audioDevices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var deviceName in DeviceService.GetAudioCaptureDevices())
+        {
+            audioDevices.Add(deviceName);
+        }
+
+        if (!string.IsNullOrWhiteSpace(_ffmpegPath))
+        {
+            foreach (var deviceName in DeviceService.GetFfmpegAudioCaptureDevices(_ffmpegPath))
+            {
+                audioDevices.Add(deviceName);
+            }
+        }
+
+        foreach (var deviceName in audioDevices.OrderBy(name => name))
+        {
+            _audioDeviceCombo.Items.Add(new AudioSourceInfo(
+                AudioSourceKind.WindowsDevice,
+                deviceName,
+                deviceName));
         }
 
         _audioDeviceCombo.EndUpdate();
-        SelectPreferredAudioDevice(_audioDeviceCombo, priorAudio);
+        SelectPreferredAudioDevice(_audioDeviceCombo, previous);
     }
 
     private static void SelectPreferredVideoDevice(
@@ -757,7 +811,7 @@ internal sealed partial class MainForm : Form
 
         var preferredWords = new[]
         {
-            "USB", "Digital Audio Interface", "Audio Grabber"
+            "Audio Pin Source", "EZCAP", "USB", "Digital Audio Interface", "Audio Grabber"
         };
 
         for (var index = 1; index < combo.Items.Count; index++)
@@ -810,6 +864,20 @@ internal sealed partial class MainForm : Form
             _startPreviewButton.Enabled = false;
             _statusText.Text = "CONNECTING...";
             _statusLamp.LampColor = Color.Goldenrod;
+
+            await _previewService.StopAsync();
+
+            var selectedInput = _inputCombo.SelectedIndex == 1
+                ? VideoInputKind.SVideo
+                : VideoInputKind.Composite;
+
+            DeviceService.TrySetVideoInput(
+                device,
+                selectedInput,
+                out var inputMessage);
+
+            _engineText.Text = inputMessage;
+            _engineText.ForeColor = Color.FromArgb(190, 195, 200);
 
             await _previewService.StartAsync(device.Index);
 
@@ -924,14 +992,12 @@ internal sealed partial class MainForm : Form
             _pausedDuration = TimeSpan.Zero;
             _pauseStarted = null;
 
-            var audioDevice = _audioDeviceCombo.SelectedIndex > 0
-                ? _audioDeviceCombo.SelectedItem?.ToString()
-                : null;
+            var audioSource = _audioDeviceCombo.SelectedItem as AudioSourceInfo;
 
             await _recordingService.StartSessionAsync(
                 _ffmpegPath,
                 videoDevice.Name,
-                audioDevice,
+                audioSource,
                 outputPath);
 
             _recordingTimer.Start();
@@ -1369,23 +1435,9 @@ internal sealed partial class MainForm : Form
             return;
         }
 
-        if (e.KeyCode == Keys.Space)
-        {
-            if (_captureState == CaptureUiState.Recording)
-            {
-                await PauseRecordingAsync();
-            }
-            else if (_captureState == CaptureUiState.Paused)
-            {
-                await ResumeRecordingAsync();
-            }
-            else if (_captureState == CaptureUiState.Preview)
-            {
-                await BeginRecordingAsync();
-            }
-
-            e.Handled = true;
-        }
+        // Recording is controlled only by the on-screen buttons.
+        // Do not use Space as a global shortcut because typing in Customer,
+        // Tape Label, or Notes must never start or pause a recording.
     }
 
     private async void MainForm_FormClosing(
