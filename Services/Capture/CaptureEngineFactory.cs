@@ -10,8 +10,7 @@ internal static class CaptureEngineFactory
     {
         return engineKind switch
         {
-            CaptureEngineKind.OpenCv => throw new NotSupportedException(
-                "The OpenCV capture adapter has not been added yet."),
+            CaptureEngineKind.OpenCv => new OpenCvCaptureEngine(),
             CaptureEngineKind.DirectShow => throw new NotSupportedException(
                 "The DirectShow capture engine has not been added yet."),
             _ => throw new ArgumentOutOfRangeException(nameof(engineKind), engineKind, null)
