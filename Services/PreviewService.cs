@@ -33,10 +33,14 @@ internal sealed class PreviewService : IDisposable
                 "Close ArcSoft, Camera, OBS, or any other program that may be using it.");
         }
 
-        // NTSC SD defaults. A driver may ignore values it does not support.
+        // Analog USB grabbers are often strict about format negotiation.
+        // YUY2 at 720x480/29.97 is the normal NTSC capture format. Some
+        // drivers only accept 30.0, so we use that value while preserving
+        // the full 720x480 frame.
+        capture.Set(VideoCaptureProperties.FourCC, ('Y') | ('U' << 8) | ('Y' << 16) | ('2' << 24));
         capture.Set(VideoCaptureProperties.FrameWidth, 720);
         capture.Set(VideoCaptureProperties.FrameHeight, 480);
-        capture.Set(VideoCaptureProperties.Fps, 29.97);
+        capture.Set(VideoCaptureProperties.Fps, 30.0);
         capture.Set(VideoCaptureProperties.BufferSize, 1);
 
         lock (_sync)
@@ -53,6 +57,8 @@ internal sealed class PreviewService : IDisposable
         try
         {
             using var frame = new Mat();
+            var lastGoodFrame = DateTime.UtcNow;
+            var reportedNoSignal = false;
 
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -70,9 +76,23 @@ internal sealed class PreviewService : IDisposable
 
                 if (!capture.Read(frame) || frame.Empty())
                 {
+                    if (!reportedNoSignal &&
+                        DateTime.UtcNow - lastGoodFrame > TimeSpan.FromSeconds(3))
+                    {
+                        reportedNoSignal = true;
+                        PreviewError?.Invoke(
+                            this,
+                            "The device opened, but it is not delivering video frames. " +
+                            "Make sure the VCR is playing, then try the other Input setting " +
+                            "(Composite / RCA or S-Video).");
+                    }
+
                     Thread.Sleep(20);
                     continue;
                 }
+
+                lastGoodFrame = DateTime.UtcNow;
+                reportedNoSignal = false;
 
                 using var bitmap = BitmapConverter.ToBitmap(frame);
                 FrameReady?.Invoke(this, new Bitmap(bitmap));

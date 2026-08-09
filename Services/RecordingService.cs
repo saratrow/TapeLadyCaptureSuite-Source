@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
+using TapeLadyCaptureSuite.Models;
 
 namespace TapeLadyCaptureSuite.Services;
 
@@ -17,7 +18,7 @@ internal sealed class RecordingService : IDisposable
     private CancellationTokenSource? _cancellation;
     private string? _ffmpegPath;
     private string? _videoDevice;
-    private string? _audioDevice;
+    private AudioSourceInfo? _audioSource;
     private string? _sessionFolder;
     private string? _finalOutputPath;
     private bool _stopping;
@@ -37,7 +38,7 @@ internal sealed class RecordingService : IDisposable
     public async Task StartSessionAsync(
         string ffmpegPath,
         string videoDevice,
-        string? audioDevice,
+        AudioSourceInfo? audioSource,
         string finalOutputPath)
     {
         ThrowIfDisposed();
@@ -49,7 +50,9 @@ internal sealed class RecordingService : IDisposable
 
         _ffmpegPath = ffmpegPath;
         _videoDevice = videoDevice;
-        _audioDevice = string.IsNullOrWhiteSpace(audioDevice) ? null : audioDevice;
+        _audioSource = audioSource is null || audioSource.Kind == AudioSourceKind.None
+            ? null
+            : audioSource;
         _finalOutputPath = finalOutputPath;
 
         var parent = Path.GetDirectoryName(finalOutputPath)
@@ -193,10 +196,27 @@ internal sealed class RecordingService : IDisposable
 
         AddCommonInputArguments(startInfo.ArgumentList);
 
+        // Match the exact NTSC/YUY2 format used by the working OpenCV preview.
+        // Leaving format negotiation to the driver caused the lower portion of
+        // some EZCAP frames to be decoded as a green/corrupted strip.
+        startInfo.ArgumentList.Add("-video_size");
+        startInfo.ArgumentList.Add("720x480");
+        startInfo.ArgumentList.Add("-framerate");
+        startInfo.ArgumentList.Add("30000/1001");
+        startInfo.ArgumentList.Add("-pixel_format");
+        startInfo.ArgumentList.Add("yuyv422");
+
         var input = $"video={_videoDevice}";
-        if (!string.IsNullOrWhiteSpace(_audioDevice))
+        if (_audioSource is not null)
         {
-            input += $":audio={_audioDevice}";
+            if (_audioSource.Kind == AudioSourceKind.VideoDevicePin &&
+                !string.IsNullOrWhiteSpace(_audioSource.PinName))
+            {
+                startInfo.ArgumentList.Add("-audio_pin_name");
+                startInfo.ArgumentList.Add(_audioSource.PinName);
+            }
+
+            input += $":audio={_audioSource.DeviceName}";
         }
 
         startInfo.ArgumentList.Add("-i");
@@ -206,7 +226,7 @@ internal sealed class RecordingService : IDisposable
         startInfo.ArgumentList.Add("-map");
         startInfo.ArgumentList.Add("0:v:0");
 
-        if (!string.IsNullOrWhiteSpace(_audioDevice))
+        if (_audioSource is not null)
         {
             startInfo.ArgumentList.Add("-map");
             startInfo.ArgumentList.Add("0:a:0?");
@@ -219,7 +239,7 @@ internal sealed class RecordingService : IDisposable
         startInfo.ArgumentList.Add("-c:v");
         startInfo.ArgumentList.Add("libx264");
         startInfo.ArgumentList.Add("-preset");
-        startInfo.ArgumentList.Add("veryfast");
+        startInfo.ArgumentList.Add("ultrafast");
         startInfo.ArgumentList.Add("-crf");
         startInfo.ArgumentList.Add("20");
         startInfo.ArgumentList.Add("-maxrate");
@@ -229,7 +249,7 @@ internal sealed class RecordingService : IDisposable
         startInfo.ArgumentList.Add("-pix_fmt");
         startInfo.ArgumentList.Add("yuv420p");
 
-        if (!string.IsNullOrWhiteSpace(_audioDevice))
+        if (_audioSource is not null)
         {
             startInfo.ArgumentList.Add("-c:a");
             startInfo.ArgumentList.Add("aac");
@@ -251,11 +271,14 @@ internal sealed class RecordingService : IDisposable
         startInfo.ArgumentList.Add("0:v:0");
         startInfo.ArgumentList.Add("-an");
         startInfo.ArgumentList.Add("-vf");
-        startInfo.ArgumentList.Add("fps=12,scale=640:480:flags=fast_bilinear");
+        startInfo.ArgumentList.Add(
+            "fps=8,scale=480:360:flags=fast_bilinear,format=yuvj420p");
         startInfo.ArgumentList.Add("-c:v");
         startInfo.ArgumentList.Add("mjpeg");
+        startInfo.ArgumentList.Add("-pix_fmt");
+        startInfo.ArgumentList.Add("yuvj420p");
         startInfo.ArgumentList.Add("-q:v");
-        startInfo.ArgumentList.Add("8");
+        startInfo.ArgumentList.Add("10");
         startInfo.ArgumentList.Add("-f");
         startInfo.ArgumentList.Add("image2pipe");
         startInfo.ArgumentList.Add("pipe:1");
@@ -557,7 +580,7 @@ internal sealed class RecordingService : IDisposable
         var lines = segments.Select(path =>
             $"file '{path.Replace("'", "'\\''")}'");
 
-        await File.WriteAllLinesAsync(listPath, lines, Encoding.UTF8);
+        await File.WriteAllLinesAsync(listPath, lines, new UTF8Encoding(false));
 
         var startInfo = new ProcessStartInfo
         {
