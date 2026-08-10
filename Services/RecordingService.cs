@@ -196,15 +196,15 @@ internal sealed class RecordingService : IDisposable
 
         AddCommonInputArguments(startInfo.ArgumentList);
 
-        // Match the exact NTSC/YUY2 format used by the working OpenCV preview.
-        // Leaving format negotiation to the driver caused the lower portion of
-        // some EZCAP frames to be decoded as a green/corrupted strip.
+        // Use the EZCAP's confirmed NTSC dshow mode. Leaving format negotiation
+        // to the driver caused the lower portion of some frames to be decoded
+        // as a green/corrupted strip.
         startInfo.ArgumentList.Add("-video_size");
         startInfo.ArgumentList.Add("720x480");
         startInfo.ArgumentList.Add("-framerate");
-        startInfo.ArgumentList.Add("30000/1001");
+        startInfo.ArgumentList.Add("29.97");
         startInfo.ArgumentList.Add("-pixel_format");
-        startInfo.ArgumentList.Add("yuyv422");
+        startInfo.ArgumentList.Add("uyvy422");
 
         var input = $"video={_videoDevice}";
         if (_audioSource is not null)
