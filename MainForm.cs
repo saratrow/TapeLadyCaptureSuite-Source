@@ -9,7 +9,7 @@ namespace TapeLadyCaptureSuite;
 internal sealed partial class MainForm : Form
 {
     private readonly PreviewService _previewService = new();
-    private readonly DirectShowPreviewSession _directShowPreviewSession = new();
+    private DirectShowPreviewSession? _directShowPreviewSession;
     private readonly RecordingService _recordingService = new();
     private readonly System.Windows.Forms.Timer _recordingTimer = new();
     private readonly System.Windows.Forms.Timer _fileTimer = new();
@@ -18,6 +18,7 @@ internal sealed partial class MainForm : Form
     private readonly ComboBox _audioDeviceCombo = new();
     private readonly ComboBox _inputCombo = new();
     private readonly PictureBox _previewBox = new();
+    private readonly Panel _openCvPreviewContainer = new();
     private readonly Panel _nativePreviewHost = new();
     private readonly Button _startPreviewButton = new();
     private readonly Button _refreshButton = new();
@@ -360,11 +361,30 @@ internal sealed partial class MainForm : Form
 
     private Control BuildPreviewPanel()
     {
-        var outer = new Panel
+        var outer = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(8),
-            BackColor = Color.FromArgb(12, 13, 14)
+            BackColor = Color.FromArgb(12, 13, 14),
+            ColumnCount = 1,
+            RowCount = 2
+        };
+        outer.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        outer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        var previewLabel = new Label
+        {
+            Text = "LIVE PREVIEW",
+            Dock = DockStyle.Fill,
+            ForeColor = Color.FromArgb(165, 165, 165),
+            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
+            Padding = new Padding(10, 4, 0, 4)
+        };
+
+        var previewSurface = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.Black
         };
 
         _previewBox.Dock = DockStyle.Fill;
@@ -372,33 +392,40 @@ internal sealed partial class MainForm : Form
         _previewBox.SizeMode = PictureBoxSizeMode.Zoom;
         _previewBox.BorderStyle = BorderStyle.FixedSingle;
 
+        _openCvPreviewContainer.Dock = DockStyle.Fill;
+        _openCvPreviewContainer.BackColor = Color.Black;
+        _openCvPreviewContainer.Controls.Add(_previewBox);
+
         _nativePreviewHost.Dock = DockStyle.Fill;
         _nativePreviewHost.BackColor = Color.Black;
         _nativePreviewHost.BorderStyle = BorderStyle.FixedSingle;
         _nativePreviewHost.Visible = false;
         _nativePreviewHost.Resize += (_, _) =>
         {
-            if (_directShowPreviewSession.IsRunning)
+            _directShowPreviewSession?.RecordPreviewHostEvent("Resize", _nativePreviewHost);
+            if (_directShowPreviewSession?.IsRunning == true)
             {
                 _directShowPreviewSession.Resize(_nativePreviewHost.ClientSize);
             }
         };
-
-        var overlay = new Label
+        _nativePreviewHost.Paint += (_, e) =>
         {
-            Text = "LIVE PREVIEW",
-            AutoSize = true,
-            ForeColor = Color.FromArgb(165, 165, 165),
-            BackColor = Color.FromArgb(120, 0, 0, 0),
-            Font = new Font("Segoe UI", 9F, FontStyle.Bold),
-            Padding = new Padding(8, 4, 8, 4),
-            Location = new Point(18, 18)
+            _directShowPreviewSession?.RecordPreviewHostEvent("Paint", _nativePreviewHost);
+            IntPtr hdc = e.Graphics.GetHdc();
+            try
+            {
+                _directShowPreviewSession.RepaintVideo(hdc);
+            }
+            finally
+            {
+                e.Graphics.ReleaseHdc(hdc);
+            }
         };
 
-        outer.Controls.Add(_previewBox);
-        outer.Controls.Add(_nativePreviewHost);
-        outer.Controls.Add(overlay);
-        overlay.BringToFront();
+        previewSurface.Controls.Add(_openCvPreviewContainer);
+        previewSurface.Controls.Add(_nativePreviewHost);
+        outer.Controls.Add(previewLabel, 0, 0);
+        outer.Controls.Add(previewSurface, 0, 1);
 
         return outer;
     }
@@ -573,7 +600,9 @@ internal sealed partial class MainForm : Form
         _installFfmpegButton.Click += async (_, _) => await InstallFfmpegAsync();
         _hardwareDiagnosticsButton.Click += (_, _) =>
         {
-            using var diagnosticsForm = new HardwareDiagnosticsForm();
+            using var diagnosticsForm = new HardwareDiagnosticsForm(
+                () => _directShowPreviewSession?.Vmr9DiagnosticsReport
+                    ?? "No active preview graph is available from this window.");
             diagnosticsForm.ShowDialog(this);
         };
 
@@ -907,22 +936,32 @@ internal sealed partial class MainForm : Form
 
             if (UseNativeDirectShowPreview(device))
             {
-                _previewBox.Visible = false;
+                _openCvPreviewContainer.Visible = false;
                 _nativePreviewHost.Visible = true;
                 _nativePreviewHost.CreateControl();
-                await _directShowPreviewSession.StartAsync(
+                var previewSession = new DirectShowPreviewSession();
+                _directShowPreviewSession = previewSession;
+                var diagnostics = new DirectShowPreviewStartDiagnostics(
+                    device.Name,
+                    device.DevicePath,
+                    DirectShowRendererMode.Vmr9Windowless,
+                    startedAfterPreviousStop: false,
+                    _nativePreviewHost);
+                await previewSession.StartAsync(
                     device.DevicePath,
                     _nativePreviewHost.Handle,
-                    _nativePreviewHost.ClientSize);
+                    _nativePreviewHost.ClientSize,
+                    DirectShowRendererMode.Vmr9Windowless,
+                    diagnostics);
 
                 _engineText.Text =
-                    $"Native DirectShow • {inputMessage} • Video: {_directShowPreviewSession.VideoStandardDescription}";
+                    $"Native DirectShow / VMR9 • {inputMessage} • Video: {previewSession.VideoStandardDescription} • Format: {previewSession.VideoFormatDescription}";
                 _fullScreenButton.Enabled = false;
             }
             else
             {
                 _nativePreviewHost.Visible = false;
-                _previewBox.Visible = true;
+                _openCvPreviewContainer.Visible = true;
                 await _previewService.StartAsync(device.Index);
 
                 _engineText.Text = $"OpenCV fallback • {inputMessage}";
@@ -935,6 +974,7 @@ internal sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
+            await StopActivePreviewEngineAsync();
             SetUiState(CaptureUiState.Ready);
             MessageBox.Show(
                 this,
@@ -958,7 +998,7 @@ internal sealed partial class MainForm : Form
         await StopActivePreviewEngineAsync();
         ClearPreviewImage();
         _nativePreviewHost.Visible = false;
-        _previewBox.Visible = true;
+        _openCvPreviewContainer.Visible = true;
         _fullScreenButton.Enabled = true;
 
         _startPreviewButton.Text = "Start";
@@ -1039,7 +1079,7 @@ internal sealed partial class MainForm : Form
             await StopActivePreviewEngineAsync();
             ClearPreviewImage();
             _nativePreviewHost.Visible = false;
-            _previewBox.Visible = true;
+            _openCvPreviewContainer.Visible = true;
             _fullScreenButton.Enabled = true;
 
             _activeOutputPath = outputPath;
@@ -1384,15 +1424,34 @@ internal sealed partial class MainForm : Form
     }
 
     private bool IsPreviewRunning =>
-        _previewService.IsRunning || _directShowPreviewSession.IsRunning;
+        _previewService.IsRunning || _directShowPreviewSession?.IsRunning == true;
 
     private static bool UseNativeDirectShowPreview(CaptureDeviceInfo device) =>
         device.Name.Contains("ezcap", StringComparison.OrdinalIgnoreCase);
 
     private async Task StopActivePreviewEngineAsync()
     {
-        await _directShowPreviewSession.StopAsync();
+        await RetireCurrentDirectShowSessionAsync();
         await _previewService.StopAsync();
+    }
+
+    private async Task RetireCurrentDirectShowSessionAsync()
+    {
+        DirectShowPreviewSession? previewSession = _directShowPreviewSession;
+        _directShowPreviewSession = null;
+        if (previewSession is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await previewSession.StopAsync();
+        }
+        finally
+        {
+            previewSession.Dispose();
+        }
     }
 
     private void PreviewService_FrameReady(object? sender, Bitmap frame)
@@ -1546,11 +1605,18 @@ internal sealed partial class MainForm : Form
         _closing = true;
         _recordingTimer.Stop();
         _fileTimer.Stop();
-        _directShowPreviewSession.Dispose();
+        DisposeCurrentDirectShowSession();
         await _previewService.StopAsync();
 
         ClearPreviewImage();
         _previewService.Dispose();
         _recordingService.Dispose();
+    }
+
+    private void DisposeCurrentDirectShowSession()
+    {
+        DirectShowPreviewSession? previewSession = _directShowPreviewSession;
+        _directShowPreviewSession = null;
+        previewSession?.Dispose();
     }
 }

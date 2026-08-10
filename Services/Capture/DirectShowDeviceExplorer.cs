@@ -71,6 +71,7 @@ internal static class DirectShowDeviceExplorer
                     text.AppendLine($"  - {pin.Name}");
                     text.AppendLine($"    Direction: {pin.Direction}");
                     text.AppendLine($"    Kind: {pin.Kind}");
+                    text.AppendLine($"    Category: {pin.Category}");
 
                     if (pin.MediaTypes.Count == 0)
                     {
@@ -83,7 +84,16 @@ internal static class DirectShowDeviceExplorer
                         {
                             text.AppendLine(
                                 $"      {mediaType.MajorTypeName} / {mediaType.SubTypeName} " +
-                                $"(format: {mediaType.FormatTypeName})");
+                                $"(format: {mediaType.FormatTypeName}) {mediaType.Details}");
+                        }
+                    }
+
+                    if (pin.VideoCapabilities.Count > 0)
+                    {
+                        text.AppendLine("    IAMStreamConfig video capabilities:");
+                        foreach (var capability in pin.VideoCapabilities)
+                        {
+                            text.AppendLine($"      {capability.Description}");
                         }
                     }
                 }
@@ -149,7 +159,9 @@ internal static class DirectShowDeviceExplorer
                         "Unreadable pin",
                         "Unknown",
                         CapturePinKind.Other,
+                        "Not reported",
                         Array.Empty<DirectShowMediaTypeReport>(),
+                        Array.Empty<DirectShowVideoCapabilityReport>(),
                         ex.Message));
                 }
                 finally
@@ -185,6 +197,7 @@ internal static class DirectShowDeviceExplorer
         var name = "Unnamed pin";
         var directionName = "Unknown";
         var mediaTypes = new List<DirectShowMediaTypeReport>();
+        var videoCapabilities = new List<DirectShowVideoCapabilityReport>();
         string? errorMessage = null;
 
         var hr = pin.QueryPinInfo(out var pinInfo);
@@ -209,6 +222,7 @@ internal static class DirectShowDeviceExplorer
         try
         {
             EnumerateMediaTypes(pin, mediaTypes);
+            EnumerateVideoCapabilities(pin, videoCapabilities);
         }
         catch (Exception ex)
         {
@@ -220,7 +234,9 @@ internal static class DirectShowDeviceExplorer
             name,
             directionName,
             kind,
+                GetPinCategory(pin),
             mediaTypes,
+                videoCapabilities,
             errorMessage);
     }
 
@@ -248,6 +264,7 @@ internal static class DirectShowDeviceExplorer
                         FriendlyGuid(mediaType.majorType),
                         FriendlyGuid(mediaType.subType),
                         FriendlyGuid(mediaType.formatType),
+                        DescribeVideoFormat(mediaType),
                         mediaType.majorType,
                         mediaType.subType,
                         mediaType.formatType));
@@ -263,6 +280,152 @@ internal static class DirectShowDeviceExplorer
         {
             ReleaseCom(mediaTypeEnumerator);
         }
+    }
+
+    private static void EnumerateVideoCapabilities(
+        IPin pin,
+        ICollection<DirectShowVideoCapabilityReport> destination)
+    {
+        if (pin is not IAMStreamConfig streamConfig)
+        {
+            return;
+        }
+
+        IntPtr capabilities = IntPtr.Zero;
+        try
+        {
+            int hr = streamConfig.GetNumberOfCapabilities(out int count, out int capabilitySize);
+            if (hr < 0 || count <= 0 || capabilitySize <= 0)
+            {
+                return;
+            }
+
+            capabilities = Marshal.AllocCoTaskMem(capabilitySize);
+            for (int index = 0; index < count; index++)
+            {
+                AMMediaType? mediaType = null;
+                try
+                {
+                    hr = streamConfig.GetStreamCaps(index, out mediaType, capabilities);
+                    if (hr >= 0 && mediaType is not null && mediaType.majorType == MediaType.Video)
+                    {
+                        destination.Add(new DirectShowVideoCapabilityReport(
+                            index,
+                            DescribeVideoFormat(mediaType)));
+                    }
+                }
+                finally
+                {
+                    if (mediaType is not null)
+                    {
+                        DsUtils.FreeAMMediaType(mediaType);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            if (capabilities != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(capabilities);
+            }
+        }
+    }
+
+    private static string GetPinCategory(IPin pin)
+    {
+        if (pin is not IKsPropertySet propertySet)
+        {
+            return "Not reported";
+        }
+
+        IntPtr categoryPointer = IntPtr.Zero;
+        try
+        {
+            categoryPointer = Marshal.AllocCoTaskMem(Marshal.SizeOf<Guid>());
+            int hr = propertySet.Get(
+                PropSetID.Pin,
+                (int)AMPropertyPin.Category,
+                IntPtr.Zero,
+                0,
+                categoryPointer,
+                Marshal.SizeOf<Guid>(),
+                out _);
+
+            if (hr < 0)
+            {
+                return "Not reported";
+            }
+
+            var category = Marshal.PtrToStructure<Guid>(categoryPointer);
+            return category == Guid.Parse(PinCategory.Preview.ToString()) ? "Preview"
+                : category == Guid.Parse(PinCategory.Capture.ToString()) ? "Capture"
+                : category.ToString("D");
+        }
+        catch
+        {
+            return "Not reported";
+        }
+        finally
+        {
+            if (categoryPointer != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(categoryPointer);
+            }
+        }
+    }
+
+    private static string DescribeVideoFormat(AMMediaType mediaType)
+    {
+        if (mediaType.majorType != MediaType.Video || mediaType.formatPtr == IntPtr.Zero)
+        {
+            return string.Empty;
+        }
+
+        if (mediaType.formatType == FormatType.VideoInfo)
+        {
+            var videoInfo = Marshal.PtrToStructure<VideoInfoHeader>(mediaType.formatPtr);
+            if (videoInfo.BmiHeader is null)
+            {
+                return string.Empty;
+            }
+
+            return DescribeVideoFormatDetails(
+                videoInfo.BmiHeader.Width,
+                videoInfo.BmiHeader.Height,
+                videoInfo.AvgTimePerFrame,
+                "Not reported");
+        }
+
+        if (mediaType.formatType == FormatType.VideoInfo2)
+        {
+            var videoInfo = Marshal.PtrToStructure<VideoInfoHeader2>(mediaType.formatPtr);
+            if (videoInfo.BmiHeader is null)
+            {
+                return string.Empty;
+            }
+
+            return DescribeVideoFormatDetails(
+                videoInfo.BmiHeader.Width,
+                videoInfo.BmiHeader.Height,
+                videoInfo.AvgTimePerFrame,
+                videoInfo.InterlaceFlags.ToString());
+        }
+
+        return string.Empty;
+    }
+
+    private static string DescribeVideoFormatDetails(
+        int width,
+        int height,
+        long averageTimePerFrame,
+        string interlace)
+    {
+        double framesPerSecond = averageTimePerFrame > 0
+            ? 10_000_000d / averageTimePerFrame
+            : 0;
+
+        return $"{width}x{Math.Abs(height)} @ {framesPerSecond:0.###} fps; interlace: {interlace}";
     }
 
     private static CapturePinKind DeterminePinKind(
@@ -338,13 +501,18 @@ internal sealed record DirectShowPinReport(
     string Name,
     string Direction,
     CapturePinKind Kind,
+    string Category,
     IReadOnlyList<DirectShowMediaTypeReport> MediaTypes,
+    IReadOnlyList<DirectShowVideoCapabilityReport> VideoCapabilities,
     string? ErrorMessage);
 
 internal sealed record DirectShowMediaTypeReport(
     string MajorTypeName,
     string SubTypeName,
     string FormatTypeName,
+    string Details,
     Guid MajorType,
     Guid SubType,
     Guid FormatType);
+
+internal sealed record DirectShowVideoCapabilityReport(int Index, string Description);

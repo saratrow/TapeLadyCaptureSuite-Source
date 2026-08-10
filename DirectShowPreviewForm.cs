@@ -10,14 +10,17 @@ namespace TapeLadyCaptureSuite;
 internal sealed class DirectShowPreviewForm : Form
 {
     private readonly ComboBox _deviceCombo = new();
+    private readonly ComboBox _rendererCombo = new();
     private readonly Button _refreshButton = new();
     private readonly Button _startButton = new();
     private readonly Button _stopButton = new();
+    private readonly Button _copyGraphButton = new();
     private readonly Panel _previewHost = new();
     private readonly ProgressBar _audioMeter = new();
     private readonly Label _audioLabel = new();
     private readonly Label _statusLabel = new();
-    private readonly DirectShowPreviewSession _previewSession = new();
+    private DirectShowPreviewSession? _previewSession;
+    private bool _hasStoppedPreview;
 
     public DirectShowPreviewForm()
     {
@@ -63,28 +66,40 @@ internal sealed class DirectShowPreviewForm : Form
         var controls = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 4,
+            ColumnCount = 6,
             RowCount = 1,
             Padding = new Padding(0, 6, 0, 6)
         };
         controls.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        controls.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         controls.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 95));
         controls.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 125));
         controls.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 95));
+        controls.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
 
         _deviceCombo.Dock = DockStyle.Fill;
         _deviceCombo.DropDownStyle = ComboBoxStyle.DropDownList;
         _deviceCombo.BackColor = Color.FromArgb(52, 55, 59);
         _deviceCombo.ForeColor = Color.White;
 
+        _rendererCombo.Dock = DockStyle.Fill;
+        _rendererCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+        _rendererCombo.BackColor = Color.FromArgb(52, 55, 59);
+        _rendererCombo.ForeColor = Color.White;
+        _rendererCombo.Items.AddRange(["Default Video Renderer", "VMR9 Windowless"]);
+        _rendererCombo.SelectedIndex = 0;
+
         ConfigureButton(_refreshButton, "Refresh");
         ConfigureButton(_startButton, "Start Preview");
         ConfigureButton(_stopButton, "Stop");
+        ConfigureButton(_copyGraphButton, "Copy Graph");
 
         controls.Controls.Add(_deviceCombo, 0, 0);
-        controls.Controls.Add(_refreshButton, 1, 0);
-        controls.Controls.Add(_startButton, 2, 0);
-        controls.Controls.Add(_stopButton, 3, 0);
+        controls.Controls.Add(_rendererCombo, 1, 0);
+        controls.Controls.Add(_refreshButton, 2, 0);
+        controls.Controls.Add(_startButton, 3, 0);
+        controls.Controls.Add(_stopButton, 4, 0);
+        controls.Controls.Add(_copyGraphButton, 5, 0);
         root.Controls.Add(controls, 0, 1);
 
         _previewHost.Dock = DockStyle.Fill;
@@ -143,18 +158,31 @@ internal sealed class DirectShowPreviewForm : Form
         _refreshButton.Click += (_, _) => RefreshDevices();
         _startButton.Click += (_, _) => StartPreview();
         _stopButton.Click += (_, _) => StopPreview();
-        _previewSession.AudioLevelChanged += PreviewSession_AudioLevelChanged;
+        _copyGraphButton.Click += (_, _) => CopyGraphReport();
         _previewHost.Resize += (_, _) =>
         {
-            if (_previewSession.IsRunning)
+            _previewSession?.RecordPreviewHostEvent("Resize", _previewHost);
+            if (_previewSession?.IsRunning == true)
             {
                 _previewSession.Resize(_previewHost.ClientSize);
             }
         };
+        _previewHost.Paint += (_, e) =>
+        {
+            _previewSession?.RecordPreviewHostEvent("Paint", _previewHost);
+            IntPtr hdc = e.Graphics.GetHdc();
+            try
+            {
+                _previewSession?.RepaintVideo(hdc);
+            }
+            finally
+            {
+                e.Graphics.ReleaseHdc(hdc);
+            }
+        };
         FormClosing += (_, _) =>
         {
-            _previewSession.AudioLevelChanged -= PreviewSession_AudioLevelChanged;
-            _previewSession.Dispose();
+            DisposePreviewSession();
         };
     }
 
@@ -246,6 +274,7 @@ internal sealed class DirectShowPreviewForm : Form
             return;
         }
 
+        DirectShowPreviewStartDiagnostics? diagnostics = null;
         try
         {
             UseWaitCursor = true;
@@ -253,23 +282,45 @@ internal sealed class DirectShowPreviewForm : Form
             _audioLabel.Text = "EZCAP AUDIO: connecting...";
             _statusLabel.Text = $"Opening {selected.Name} through DirectShow...";
             _previewHost.CreateControl();
-            _previewSession.Start(selected.DevicePath, _previewHost.Handle, _previewHost.ClientSize);
+            var rendererMode = _rendererCombo.SelectedIndex == 1
+                ? DirectShowRendererMode.Vmr9Windowless
+                : DirectShowRendererMode.Default;
 
-            _audioLabel.Text = _previewSession.IsAudioConnected
+            diagnostics = new DirectShowPreviewStartDiagnostics(
+                selected.Name,
+                selected.DevicePath,
+                rendererMode,
+                _hasStoppedPreview,
+                _previewHost);
+            diagnostics.BeginPhase("session construction");
+            var previewSession = new DirectShowPreviewSession();
+            diagnostics.CompletePhase("session construction");
+            previewSession.AudioLevelChanged += PreviewSession_AudioLevelChanged;
+            _previewSession = previewSession;
+            previewSession.Start(
+                selected.DevicePath,
+                _previewHost.Handle,
+                _previewHost.ClientSize,
+                rendererMode,
+                diagnostics);
+
+            _audioLabel.Text = previewSession.IsAudioConnected
                 ? "EZCAP AUDIO LEVEL: waiting for tape audio..."
-                : _previewSession.AudioDescription;
-            _audioLabel.ForeColor = _previewSession.IsAudioConnected ? Color.White : Color.Goldenrod;
+                : previewSession.AudioDescription;
+            _audioLabel.ForeColor = previewSession.IsAudioConnected ? Color.White : Color.Goldenrod;
 
             _statusLabel.Text =
                 $"DirectShow preview is running: {selected.Name}. " +
-                $"Video: {_previewSession.VideoStandardDescription}. " +
-                $"Audio: {_previewSession.AudioDescription}.";
+                $"Video: {previewSession.VideoStandardDescription}; {previewSession.VideoFormatDescription}; {previewSession.VideoPinDescription}. " +
+                $"Audio: {previewSession.AudioDescription}.";
             _startButton.Enabled = false;
             _deviceCombo.Enabled = false;
+            _rendererCombo.Enabled = false;
         }
         catch (Exception ex)
         {
-            _previewSession.Stop();
+            diagnostics?.LogStartFailure(ex);
+            StopPreviewSession();
             _audioMeter.Value = 0;
             _audioLabel.Text = "EZCAP AUDIO: not connected";
             _statusLabel.Text = "DirectShow preview could not start.";
@@ -287,14 +338,57 @@ internal sealed class DirectShowPreviewForm : Form
 
     private void StopPreview()
     {
-        _previewSession.Stop();
+        StopPreviewSession();
         _previewHost.Invalidate();
         _audioMeter.Value = 0;
         _audioLabel.Text = "EZCAP AUDIO: not connected";
         _audioLabel.ForeColor = Color.Silver;
         _startButton.Enabled = _deviceCombo.Items.Count > 0;
         _deviceCombo.Enabled = true;
+        _rendererCombo.Enabled = true;
         _statusLabel.Text = "Preview stopped.";
+    }
+
+    private void CopyGraphReport()
+    {
+        try
+        {
+            Clipboard.SetText(_previewSession?.Vmr9DiagnosticsReport ?? "No active DirectShow graph.");
+            _statusLabel.Text = "VMR9 diagnostic report copied to the clipboard.";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "DirectShow Preview",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void StopPreviewSession()
+    {
+        DirectShowPreviewSession? previewSession = _previewSession;
+        _previewSession = null;
+        if (previewSession is null)
+        {
+            return;
+        }
+
+        previewSession.AudioLevelChanged -= PreviewSession_AudioLevelChanged;
+        _hasStoppedPreview = true;
+        previewSession.Stop();
+        previewSession.Dispose();
+    }
+
+    private void DisposePreviewSession()
+    {
+        DirectShowPreviewSession? previewSession = _previewSession;
+        _previewSession = null;
+        if (previewSession is null)
+        {
+            return;
+        }
+
+        previewSession.AudioLevelChanged -= PreviewSession_AudioLevelChanged;
+        previewSession.Dispose();
     }
 
     private sealed record DirectShowPreviewDevice(string Name, string DevicePath)

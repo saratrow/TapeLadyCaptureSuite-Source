@@ -11,11 +11,15 @@ internal sealed class HardwareDiagnosticsForm : Form
     private readonly Button _refreshButton = new();
     private readonly Button _saveButton = new();
     private readonly Button _copyButton = new();
+    private readonly Button _activeGraphButton = new();
     private readonly Button _previewButton = new();
+    private readonly Button _mainStyleVmr9Button = new();
     private readonly Label _statusLabel = new();
+    private readonly Func<string>? _runningGraphReportProvider;
 
-    public HardwareDiagnosticsForm()
+    public HardwareDiagnosticsForm(Func<string>? runningGraphReportProvider = null)
     {
+        _runningGraphReportProvider = runningGraphReportProvider;
         Text = "Tape Lady Capture Suite — Hardware Diagnostics";
         StartPosition = FormStartPosition.CenterParent;
         MinimumSize = new Size(780, 560);
@@ -83,12 +87,16 @@ internal sealed class HardwareDiagnosticsForm : Form
         ConfigureButton(_refreshButton, "Refresh Report");
         ConfigureButton(_saveButton, "Save Report...");
         ConfigureButton(_copyButton, "Copy Report");
+        ConfigureButton(_activeGraphButton, "Active Graph");
         ConfigureButton(_previewButton, "Test DirectShow Preview...");
+        ConfigureButton(_mainStyleVmr9Button, "Test Main-Style VMR9 Host");
 
         buttons.Controls.Add(_refreshButton);
         buttons.Controls.Add(_saveButton);
         buttons.Controls.Add(_copyButton);
+        buttons.Controls.Add(_activeGraphButton);
         buttons.Controls.Add(_previewButton);
+        buttons.Controls.Add(_mainStyleVmr9Button);
         root.Controls.Add(buttons, 0, 3);
 
         Controls.Add(root);
@@ -111,13 +119,30 @@ internal sealed class HardwareDiagnosticsForm : Form
         _refreshButton.Click += async (_, _) => await RefreshReportAsync();
         _saveButton.Click += (_, _) => SaveReport();
         _copyButton.Click += (_, _) => CopyReport();
+        _activeGraphButton.Click += (_, _) => ShowActiveGraph();
         _previewButton.Click += (_, _) => ShowDirectShowPreview();
+        _mainStyleVmr9Button.Click += (_, _) => ShowMainStyleVmr9Host();
     }
 
     private void ShowDirectShowPreview()
     {
         using var previewForm = new DirectShowPreviewForm();
         previewForm.ShowDialog(this);
+    }
+
+    private void ShowMainStyleVmr9Host()
+    {
+        using var hostForm = new MainStyleVmr9HostForm();
+        hostForm.ShowDialog(this);
+    }
+
+    private void ShowActiveGraph()
+    {
+        _reportText.Text = _runningGraphReportProvider?.Invoke()
+            ?? "No active preview graph is available from this window.";
+        _reportText.SelectionStart = 0;
+        _reportText.SelectionLength = 0;
+        _statusLabel.Text = "Active DirectShow graph report displayed.";
     }
 
     private async Task RefreshReportAsync()
@@ -206,7 +231,9 @@ internal sealed class HardwareDiagnosticsForm : Form
         _refreshButton.Enabled = !busy;
         _saveButton.Enabled = !busy;
         _copyButton.Enabled = !busy;
+        _activeGraphButton.Enabled = !busy;
         _previewButton.Enabled = !busy;
+        _mainStyleVmr9Button.Enabled = !busy;
         _statusLabel.Text = status;
     }
 }
