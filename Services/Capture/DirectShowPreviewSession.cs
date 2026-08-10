@@ -24,6 +24,8 @@ internal sealed class DirectShowPreviewSession : IDisposable
     private AudioSampleCallback? _audioCallback;
     private IMediaControl? _mediaControl;
     private IVideoWindow? _videoWindow;
+    private readonly object _lifecycleLock = new();
+    private Task? _stopTask;
     private bool _disposed;
 
     public bool IsRunning { get; private set; }
@@ -36,10 +38,21 @@ internal sealed class DirectShowPreviewSession : IDisposable
 
     public event EventHandler<AudioLevelEventArgs>? AudioLevelChanged;
 
+    public async Task StartAsync(string devicePath, IntPtr previewHostHandle, Size previewSize)
+    {
+        ThrowIfDisposed();
+        await StopAsync();
+        StartCore(devicePath, previewHostHandle, previewSize);
+    }
+
     public void Start(string devicePath, IntPtr previewHostHandle, Size previewSize)
     {
         ThrowIfDisposed();
+        StartCore(devicePath, previewHostHandle, previewSize);
+    }
 
+    private void StartCore(string devicePath, IntPtr previewHostHandle, Size previewSize)
+    {
         if (string.IsNullOrWhiteSpace(devicePath))
         {
             throw new ArgumentException("A DirectShow device path is required.", nameof(devicePath));
@@ -49,8 +62,6 @@ internal sealed class DirectShowPreviewSession : IDisposable
         {
             throw new ArgumentException("The preview host window is not ready.", nameof(previewHostHandle));
         }
-
-        Stop();
 
         DsDevice[] devices = DsDevice.GetDevicesOfCat(FilterCategory.VideoInputDevice);
         DsDevice? selectedDevice = null;
@@ -102,9 +113,6 @@ internal sealed class DirectShowPreviewSession : IDisposable
 
             DsError.ThrowExceptionForHR(hr);
 
-            // Add a Sample Grabber and Null Renderer to the EZCAP's PCM output.
-            // This verifies live embedded audio without sending it to speakers,
-            // which avoids feedback while a tape is being monitored.
             TryConnectAudioLevelBranch();
 
             _mediaControl = (IMediaControl)_graph;
@@ -286,26 +294,105 @@ internal sealed class DirectShowPreviewSession : IDisposable
         DsError.ThrowExceptionForHR(hr);
     }
 
+    public Task StopAsync()
+    {
+        GraphResources? resources;
+
+        lock (_lifecycleLock)
+        {
+            if (_stopTask is not null)
+            {
+                return _stopTask;
+            }
+
+            resources = DetachGraph();
+            if (resources is null)
+            {
+                return Task.CompletedTask;
+            }
+
+            _stopTask = Task.Run(() => StopGraph(resources));
+        }
+
+        return CompleteStopAsync(_stopTask);
+    }
+
     public void Stop()
+    {
+        _ = StopAsync();
+    }
+
+    private async Task CompleteStopAsync(Task stopTask)
+    {
+        try
+        {
+            await stopTask.ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_lifecycleLock)
+            {
+                if (ReferenceEquals(_stopTask, stopTask))
+                {
+                    _stopTask = null;
+                }
+            }
+        }
+    }
+
+    private GraphResources? DetachGraph()
     {
         IsRunning = false;
         IsAudioConnected = false;
+        VideoStandardDescription = "Not detected";
+        AudioDescription = "Not connected";
 
+        if (_graph is null && _captureGraph is null && _sourceFilter is null &&
+            _audioSampleGrabberFilter is null && _audioNullRenderer is null &&
+            _audioSampleGrabber is null && _mediaControl is null && _videoWindow is null)
+        {
+            return null;
+        }
+
+        var resources = new GraphResources(
+            _graph,
+            _captureGraph,
+            _sourceFilter,
+            _audioSampleGrabberFilter,
+            _audioNullRenderer,
+            _audioSampleGrabber,
+            _mediaControl,
+            _videoWindow);
+
+        _graph = null;
+        _captureGraph = null;
+        _sourceFilter = null;
+        _audioSampleGrabber = null;
+        _audioNullRenderer = null;
+        _audioSampleGrabberFilter = null;
+        _audioCallback = null;
+        _mediaControl = null;
+        _videoWindow = null;
+        return resources;
+    }
+
+    private static void StopGraph(GraphResources resources)
+    {
         try
         {
-            _mediaControl?.Stop();
+            resources.MediaControl?.Stop();
         }
         catch
         {
-            // Continue releasing the graph even if a driver fails during stop.
+            // A failed driver stop must not prevent the application from exiting.
         }
 
-        if (_videoWindow is not null)
+        if (resources.VideoWindow is not null)
         {
             try
             {
-                _videoWindow.put_Visible(OABool.False);
-                _videoWindow.put_Owner(IntPtr.Zero);
+                resources.VideoWindow.put_Visible(OABool.False);
+                resources.VideoWindow.put_Owner(IntPtr.Zero);
             }
             catch
             {
@@ -313,39 +400,44 @@ internal sealed class DirectShowPreviewSession : IDisposable
             }
         }
 
-        ReleaseAudioBranch();
-        ReleaseCom(_videoWindow);
-        ReleaseCom(_mediaControl);
-        ReleaseCom(_sourceFilter);
-        ReleaseCom(_captureGraph);
-        ReleaseCom(_graph);
+        ReleaseAudioBranch(resources);
+        ReleaseCom(resources.VideoWindow);
+        ReleaseCom(resources.MediaControl);
+        ReleaseCom(resources.SourceFilter);
+        ReleaseCom(resources.CaptureGraph);
+        ReleaseCom(resources.Graph);
+    }
 
-        _videoWindow = null;
-        _mediaControl = null;
-        _sourceFilter = null;
-        _captureGraph = null;
-        _graph = null;
-        VideoStandardDescription = "Not detected";
-        AudioDescription = "Not connected";
+    private static void ReleaseAudioBranch(GraphResources resources)
+    {
+        if (resources.AudioSampleGrabber is not null)
+        {
+            try
+            {
+                resources.AudioSampleGrabber.SetCallback(null, 0);
+            }
+            catch
+            {
+                // Continue releasing COM objects.
+            }
+        }
+
+        ReleaseCom(resources.AudioSampleGrabber);
+        ReleaseCom(resources.AudioNullRenderer);
+        ReleaseCom(resources.AudioSampleGrabberFilter);
     }
 
     private void ReleaseAudioBranch()
     {
-        if (_audioSampleGrabber is not null)
-        {
-            try
-            {
-                _audioSampleGrabber.SetCallback(null, 0);
-            }
-            catch
-            {
-                // Continue releasing COM objects.
-            }
-        }
-
-        ReleaseCom(_audioSampleGrabber);
-        ReleaseCom(_audioNullRenderer);
-        ReleaseCom(_audioSampleGrabberFilter);
+        ReleaseAudioBranch(new GraphResources(
+            null,
+            null,
+            null,
+            _audioSampleGrabberFilter,
+            _audioNullRenderer,
+            _audioSampleGrabber,
+            null,
+            null));
 
         _audioSampleGrabber = null;
         _audioNullRenderer = null;
@@ -360,16 +452,43 @@ internal sealed class DirectShowPreviewSession : IDisposable
             return;
         }
 
-        _disposed = true;
-        Stop();
+        lock (_lifecycleLock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            // Do not invoke a capture-driver method while WinForms is closing.
+            // The OS will reclaim this process-owned graph after the window exits.
+            DetachGraph();
+            _disposed = true;
+        }
         GC.SuppressFinalize(this);
     }
 
+    private sealed record GraphResources(
+        IGraphBuilder? Graph,
+        ICaptureGraphBuilder2? CaptureGraph,
+        IBaseFilter? SourceFilter,
+        IBaseFilter? AudioSampleGrabberFilter,
+        IBaseFilter? AudioNullRenderer,
+        ISampleGrabber? AudioSampleGrabber,
+        IMediaControl? MediaControl,
+        IVideoWindow? VideoWindow);
+
     private static void ReleaseCom(object? value)
     {
-        if (value is not null && Marshal.IsComObject(value))
+        try
         {
-            Marshal.FinalReleaseComObject(value);
+            if (value is not null && Marshal.IsComObject(value))
+            {
+                Marshal.FinalReleaseComObject(value);
+            }
+        }
+        catch
+        {
+            // Continue releasing the remaining graph interfaces.
         }
     }
 

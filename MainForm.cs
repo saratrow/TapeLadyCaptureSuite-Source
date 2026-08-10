@@ -2,12 +2,14 @@ using System.Diagnostics;
 using TapeLadyCaptureSuite.Controls;
 using TapeLadyCaptureSuite.Models;
 using TapeLadyCaptureSuite.Services;
+using TapeLadyCaptureSuite.Services.Capture;
 
 namespace TapeLadyCaptureSuite;
 
 internal sealed partial class MainForm : Form
 {
     private readonly PreviewService _previewService = new();
+    private readonly DirectShowPreviewSession _directShowPreviewSession = new();
     private readonly RecordingService _recordingService = new();
     private readonly System.Windows.Forms.Timer _recordingTimer = new();
     private readonly System.Windows.Forms.Timer _fileTimer = new();
@@ -16,9 +18,11 @@ internal sealed partial class MainForm : Form
     private readonly ComboBox _audioDeviceCombo = new();
     private readonly ComboBox _inputCombo = new();
     private readonly PictureBox _previewBox = new();
+    private readonly Panel _nativePreviewHost = new();
     private readonly Button _startPreviewButton = new();
     private readonly Button _refreshButton = new();
     private readonly Button _installFfmpegButton = new();
+    private readonly Button _hardwareDiagnosticsButton = new();
     private readonly Button _recordButton = new();
     private readonly Button _pauseButton = new();
     private readonly Button _stopButton = new();
@@ -202,7 +206,7 @@ internal sealed partial class MainForm : Form
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 10,
+            ColumnCount = 11,
             RowCount = 2,
             Padding = new Padding(10, 6, 10, 6),
             BackColor = Color.FromArgb(52, 55, 59)
@@ -218,6 +222,7 @@ internal sealed partial class MainForm : Form
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 95));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
 
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 31));
@@ -241,11 +246,13 @@ internal sealed partial class MainForm : Form
         ConfigureSmallButton(_startPreviewButton, "Start");
         ConfigureSmallButton(_fullScreenButton, "Full Screen");
         ConfigureSmallButton(_installFfmpegButton, "Install FFmpeg");
+        ConfigureSmallButton(_hardwareDiagnosticsButton, "Hardware Diagnostics");
 
         panel.Controls.Add(_refreshButton, 6, 1);
         panel.Controls.Add(_startPreviewButton, 7, 1);
         panel.Controls.Add(_fullScreenButton, 8, 1);
         panel.Controls.Add(_installFfmpegButton, 9, 1);
+        panel.Controls.Add(_hardwareDiagnosticsButton, 10, 1);
 
         return panel;
     }
@@ -365,6 +372,18 @@ internal sealed partial class MainForm : Form
         _previewBox.SizeMode = PictureBoxSizeMode.Zoom;
         _previewBox.BorderStyle = BorderStyle.FixedSingle;
 
+        _nativePreviewHost.Dock = DockStyle.Fill;
+        _nativePreviewHost.BackColor = Color.Black;
+        _nativePreviewHost.BorderStyle = BorderStyle.FixedSingle;
+        _nativePreviewHost.Visible = false;
+        _nativePreviewHost.Resize += (_, _) =>
+        {
+            if (_directShowPreviewSession.IsRunning)
+            {
+                _directShowPreviewSession.Resize(_nativePreviewHost.ClientSize);
+            }
+        };
+
         var overlay = new Label
         {
             Text = "LIVE PREVIEW",
@@ -377,6 +396,7 @@ internal sealed partial class MainForm : Form
         };
 
         outer.Controls.Add(_previewBox);
+        outer.Controls.Add(_nativePreviewHost);
         outer.Controls.Add(overlay);
         overlay.BringToFront();
 
@@ -551,6 +571,11 @@ internal sealed partial class MainForm : Form
         };
 
         _installFfmpegButton.Click += async (_, _) => await InstallFfmpegAsync();
+        _hardwareDiagnosticsButton.Click += (_, _) =>
+        {
+            using var diagnosticsForm = new HardwareDiagnosticsForm();
+            diagnosticsForm.ShowDialog(this);
+        };
 
         _startPreviewButton.Click += async (_, _) =>
         {
@@ -561,7 +586,7 @@ internal sealed partial class MainForm : Form
                 return;
             }
 
-            if (_previewService.IsRunning)
+            if (IsPreviewRunning)
             {
                 await StopPreviewAsync();
             }
@@ -575,7 +600,7 @@ internal sealed partial class MainForm : Form
         {
             RefreshAudioSources();
 
-            if (_previewService.IsRunning)
+            if (IsPreviewRunning)
             {
                 await StartSelectedPreviewAsync();
             }
@@ -589,7 +614,7 @@ internal sealed partial class MainForm : Form
                 return;
             }
 
-            if (_previewService.IsRunning)
+            if (IsPreviewRunning)
             {
                 await StartSelectedPreviewAsync();
             }
@@ -868,7 +893,8 @@ internal sealed partial class MainForm : Form
             _statusText.Text = "CONNECTING...";
             _statusLamp.LampColor = Color.Goldenrod;
 
-            await _previewService.StopAsync();
+            await StopActivePreviewEngineAsync();
+            ClearPreviewImage();
 
             var selectedInput = _inputCombo.SelectedIndex == 1
                 ? VideoInputKind.SVideo
@@ -879,10 +905,30 @@ internal sealed partial class MainForm : Form
                 selectedInput,
                 out var inputMessage);
 
-            _engineText.Text = inputMessage;
-            _engineText.ForeColor = Color.FromArgb(190, 195, 200);
+            if (UseNativeDirectShowPreview(device))
+            {
+                _previewBox.Visible = false;
+                _nativePreviewHost.Visible = true;
+                _nativePreviewHost.CreateControl();
+                await _directShowPreviewSession.StartAsync(
+                    device.DevicePath,
+                    _nativePreviewHost.Handle,
+                    _nativePreviewHost.ClientSize);
 
-            await _previewService.StartAsync(device.Index);
+                _engineText.Text =
+                    $"Native DirectShow • {inputMessage} • Video: {_directShowPreviewSession.VideoStandardDescription}";
+                _fullScreenButton.Enabled = false;
+            }
+            else
+            {
+                _nativePreviewHost.Visible = false;
+                _previewBox.Visible = true;
+                await _previewService.StartAsync(device.Index);
+
+                _engineText.Text = $"OpenCV fallback • {inputMessage}";
+                _fullScreenButton.Enabled = true;
+            }
+            _engineText.ForeColor = Color.FromArgb(190, 195, 200);
 
             _startPreviewButton.Text = "Stop";
             SetUiState(CaptureUiState.Preview);
@@ -909,8 +955,11 @@ internal sealed partial class MainForm : Form
         _statusText.Text = "STOPPING...";
         _statusLamp.LampColor = Color.Goldenrod;
 
-        await _previewService.StopAsync();
+        await StopActivePreviewEngineAsync();
         ClearPreviewImage();
+        _nativePreviewHost.Visible = false;
+        _previewBox.Visible = true;
+        _fullScreenButton.Enabled = true;
 
         _startPreviewButton.Text = "Start";
         SetUiState(CaptureUiState.Ready);
@@ -987,8 +1036,11 @@ internal sealed partial class MainForm : Form
         {
             LockRecordingControls(true);
 
-            await _previewService.StopAsync();
+            await StopActivePreviewEngineAsync();
             ClearPreviewImage();
+            _nativePreviewHost.Visible = false;
+            _previewBox.Visible = true;
+            _fullScreenButton.Enabled = true;
 
             _activeOutputPath = outputPath;
             _recordingStarted = DateTime.Now;
@@ -1331,6 +1383,18 @@ internal sealed partial class MainForm : Form
         }
     }
 
+    private bool IsPreviewRunning =>
+        _previewService.IsRunning || _directShowPreviewSession.IsRunning;
+
+    private static bool UseNativeDirectShowPreview(CaptureDeviceInfo device) =>
+        device.Name.Contains("ezcap", StringComparison.OrdinalIgnoreCase);
+
+    private async Task StopActivePreviewEngineAsync()
+    {
+        await _directShowPreviewSession.StopAsync();
+        await _previewService.StopAsync();
+    }
+
     private void PreviewService_FrameReady(object? sender, Bitmap frame)
     {
         if (_closing || IsDisposed || !IsHandleCreated)
@@ -1482,6 +1546,7 @@ internal sealed partial class MainForm : Form
         _closing = true;
         _recordingTimer.Stop();
         _fileTimer.Stop();
+        _directShowPreviewSession.Dispose();
         await _previewService.StopAsync();
 
         ClearPreviewImage();
