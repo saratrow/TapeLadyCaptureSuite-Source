@@ -17,8 +17,10 @@ internal sealed partial class MainForm
     private readonly Button _deleteQueueButton = new();
     private readonly Button _openFileButton = new();
     private readonly Button _openFolderButton = new();
+    private readonly Button _reviewVideosButton = new();
     private readonly Label _diskSpaceLabel = new();
     private QueueItem? _activeQueueItem;
+    private ReviewTrimForm? _reviewTrimForm;
 
     private Control BuildWorkflowPanel()
     {
@@ -122,7 +124,10 @@ internal sealed partial class MainForm
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
 
-        root.Controls.Add(new Label
+        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132));
+        header.Controls.Add(new Label
         {
             Text = "RECENT CAPTURES",
             Dock = DockStyle.Fill,
@@ -130,6 +135,10 @@ internal sealed partial class MainForm
             Font = new Font("Segoe UI Semibold", 12F, FontStyle.Bold),
             TextAlign = ContentAlignment.MiddleLeft
         }, 0, 0);
+        ConfigureWorkflowButton(_reviewVideosButton, "Review Videos (0)");
+        _reviewVideosButton.Dock = DockStyle.Fill;
+        header.Controls.Add(_reviewVideosButton, 1, 0);
+        root.Controls.Add(header, 0, 0);
 
         ConfigureListView(_historyList);
         _historyList.Columns.Add("Date", 112);
@@ -184,6 +193,7 @@ internal sealed partial class MainForm
         _openFileButton.Click += (_, _) => OpenSelectedHistoryFile(false);
         _openFolderButton.Click += (_, _) => OpenSelectedHistoryFile(true);
         _historyList.DoubleClick += (_, _) => OpenSelectedHistoryFile(false);
+        _reviewVideosButton.Click += (_, _) => ShowReviewVideos();
         _saveFolderText.TextChanged += (_, _) => UpdateDiskSpaceLabel();
     }
 
@@ -203,6 +213,7 @@ internal sealed partial class MainForm
         TrySelectText(_audioDeviceCombo, state.PreferredAudioDevice);
         RefreshQueueList();
         RefreshHistoryList();
+        UpdateReviewVideosButton();
         UpdateDiskSpaceLabel();
     }
 
@@ -324,6 +335,7 @@ internal sealed partial class MainForm
         _activeQueueItem = null;
         RefreshQueueList();
         RefreshHistoryList();
+        UpdateReviewVideosButton();
         PersistWorkflowState();
     }
 
@@ -354,6 +366,70 @@ internal sealed partial class MainForm
             _historyList.Items.Add(row);
         }
         _historyList.EndUpdate();
+        UpdateReviewVideosButton();
+    }
+
+    private void UpdateReviewVideosButton()
+    {
+        int needsReview = _historyItems.Count(item => item.ReviewStatus == CaptureReviewStatus.NeedsReview);
+        _reviewVideosButton.Text = $"Review Videos ({needsReview})";
+    }
+
+    private void ShowReviewVideos()
+    {
+        if (string.IsNullOrWhiteSpace(_ffmpegPath))
+        {
+            RefreshFfmpegStatus();
+        }
+
+        if (string.IsNullOrWhiteSpace(_ffmpegPath))
+        {
+            MessageBox.Show(this, "FFmpeg is required to trim completed recordings.", "Review & Trim", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        if (_reviewTrimForm is { IsDisposed: false })
+        {
+            _reviewTrimForm.Activate();
+            return;
+        }
+
+        _reviewTrimForm = new ReviewTrimForm(
+            _historyItems,
+            _ffmpegPath,
+            () => _captureState is CaptureUiState.Recording or CaptureUiState.Paused or CaptureUiState.Finalizing,
+            () =>
+            {
+                PersistWorkflowState();
+                RefreshHistoryList();
+            });
+        _reviewTrimForm.FrameAccurateTrimRequested += (_, request) => _reviewWorkQueue.Enqueue(request);
+        _reviewTrimForm.FormClosed += (_, _) => _reviewTrimForm = null;
+        _reviewTrimForm.Show(this);
+    }
+
+    private void ReviewWorkQueue_Completed(object? sender, QueuedTrimCompletedEventArgs e)
+    {
+        SafeBeginInvoke(() =>
+        {
+            if (e.Error is null && e.Result is not null)
+            {
+                CaptureHistoryItem item = e.Request.TrimRequest.HistoryItem;
+                item.ReviewStatus = CaptureReviewStatus.CompleteTrimmed;
+                item.OriginalBackupPath = e.Result.BackupPath;
+                item.OriginalDurationSeconds = e.Request.TrimRequest.OriginalDurationSeconds;
+                item.FinalDurationSeconds = e.Result.FinalDurationSeconds;
+                item.TrimStartSeconds = e.Request.TrimRequest.Start.TotalSeconds;
+                item.TrimEndSeconds = e.Request.TrimRequest.End.TotalSeconds;
+                item.TrimMethod = TrimMethod.FrameAccurate;
+                item.ReviewedAt = DateTime.Now;
+                item.FileSizeBytes = File.Exists(item.OutputPath) ? new FileInfo(item.OutputPath).Length : 0;
+                PersistWorkflowState();
+                RefreshHistoryList();
+            }
+
+            _reviewTrimForm?.CompleteQueuedTrim(e);
+        });
     }
 
     private void OpenSelectedHistoryFile(bool folder)

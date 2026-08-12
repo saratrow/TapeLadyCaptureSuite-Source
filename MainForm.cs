@@ -11,6 +11,7 @@ internal sealed partial class MainForm : Form
     private readonly PreviewService _previewService = new();
     private DirectShowPreviewSession? _directShowPreviewSession;
     private readonly RecordingService _recordingService = new();
+    private readonly ReviewWorkQueue _reviewWorkQueue;
     private readonly System.Windows.Forms.Timer _recordingTimer = new();
     private readonly System.Windows.Forms.Timer _fileTimer = new();
 
@@ -60,6 +61,8 @@ internal sealed partial class MainForm : Form
 
     public MainForm()
     {
+        _reviewWorkQueue = new ReviewWorkQueue(() => _captureState is CaptureUiState.Recording
+            or CaptureUiState.Paused or CaptureUiState.Finalizing);
         Text = "Tape Lady Capture Suite — Milestone 5.2";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(1280, 780);
@@ -71,6 +74,7 @@ internal sealed partial class MainForm : Form
 
         BuildInterface();
         WireEvents();
+        _reviewWorkQueue.Completed += ReviewWorkQueue_Completed;
 
         _recordingTimer.Interval = 250;
         _recordingTimer.Tick += (_, _) => UpdateRecordingClock();
@@ -1211,13 +1215,6 @@ internal sealed partial class MainForm : Form
             _activeOutputPath = savedPath;
             UpdateRecordingStatistics();
             CompleteActiveQueueItem(savedPath);
-
-            MessageBox.Show(
-                this,
-                $"Capture complete.\n\n{savedPath}",
-                "Tape Lady Capture Suite",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {
@@ -1342,6 +1339,7 @@ internal sealed partial class MainForm : Form
     private void SetUiState(CaptureUiState state)
     {
         _captureState = state;
+        _reviewWorkQueue.CaptureStateChanged();
 
         switch (state)
         {
