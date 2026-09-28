@@ -34,6 +34,7 @@ internal sealed partial class MainForm : Form
     private readonly ComboBox _projectCombo = new();
     private readonly Button _manageCustomersButton = new();
     private readonly TextBox _tapeLabelText = new();
+    private readonly Button _nextUnlabeledButton = new();
     private readonly TextBox _saveFolderText = new();
     private readonly Label _statusText = new();
     private readonly StatusLamp _statusLamp = new();
@@ -52,6 +53,7 @@ internal sealed partial class MainForm : Form
     private string? _ffmpegPath;
     private Customer? _activeRecordingCustomer;
     private CustomerProject? _activeRecordingProject;
+    private CaptureHistoryItem? _activeRewriteHistoryItem;
     private bool _closing;
 
     private enum CaptureUiState
@@ -114,7 +116,7 @@ internal sealed partial class MainForm : Form
 
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 94));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
@@ -187,25 +189,8 @@ internal sealed partial class MainForm : Form
             Location = new Point(21, 43)
         };
 
-        var version = new Label
-        {
-            AutoSize = true,
-            Text = "Milestone 5.2 • Audio Device Detection",
-            Font = new Font("Segoe UI", 9F),
-            ForeColor = Color.DarkGray,
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
-        };
-
         panel.Controls.Add(title);
         panel.Controls.Add(subtitle);
-        panel.Controls.Add(version);
-
-        panel.Resize += (_, _) =>
-        {
-            version.Location = new Point(
-                panel.ClientSize.Width - version.Width - 18,
-                27);
-        };
 
         return panel;
     }
@@ -271,30 +256,29 @@ internal sealed partial class MainForm : Form
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 11,
-            RowCount = 2,
+            ColumnCount = 8,
+            RowCount = 4,
             Padding = new Padding(10, 8, 10, 8),
             BackColor = Color.FromArgb(42, 44, 47)
         };
 
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 52));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 65));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 47));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 86));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
 
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 16));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
 
         AddJobLabel(panel, "Customer", 0);
         AddJobLabel(panel, "Project", 2);
         AddJobLabel(panel, "Tape Title", 4);
-        AddJobLabel(panel, "Save Folder", 7);
 
         ConfigureCombo(_customerText);
         _customerText.DropDownStyle = ComboBoxStyle.DropDown;
@@ -303,17 +287,22 @@ internal sealed partial class MainForm : Form
         ConfigureCombo(_projectCombo);
         _projectCombo.DropDownStyle = ComboBoxStyle.DropDownList;
         ConfigureTextBox(_tapeLabelText);
+        ConfigureSmallButton(_nextUnlabeledButton, "Next Unlabeled");
         ConfigureTextBox(_saveFolderText);
 
         panel.Controls.Add(_customerText, 1, 1);
         panel.Controls.Add(_projectCombo, 3, 1);
         panel.Controls.Add(_tapeLabelText, 5, 1);
-        panel.Controls.Add(_saveFolderText, 8, 1);
+        panel.Controls.Add(_nextUnlabeledButton, 6, 1);
 
         ConfigureSmallButton(_manageCustomersButton, "Customers / Projects");
         ConfigureSmallButton(_browseButton, "Browse...");
-        panel.Controls.Add(_manageCustomersButton, 6, 1);
-        panel.Controls.Add(_browseButton, 9, 1);
+        panel.Controls.Add(_manageCustomersButton, 7, 1);
+
+        AddJobLabel(panel, "Save Folder", 0);
+        panel.Controls.Add(_saveFolderText, 0, 3);
+        panel.SetColumnSpan(_saveFolderText, 7);
+        panel.Controls.Add(_browseButton, 7, 3);
 
         return panel;
     }
@@ -674,6 +663,7 @@ internal sealed partial class MainForm : Form
         _fullScreenButton.Click += (_, _) => ShowFullScreenPreview();
         _browseButton.Click += (_, _) => BrowseForSaveFolder();
         _manageCustomersButton.Click += (_, _) => ShowCustomerProjectManager();
+        _nextUnlabeledButton.Click += (_, _) => UseNextUnlabeledTitle();
         _customerText.SelectionChangeCommitted += (_, _) => SelectCustomer(_customerText.SelectedItem as Customer);
         _projectCombo.SelectionChangeCommitted += (_, _) => SelectProject(_projectCombo.SelectedItem as CustomerProject);
 
@@ -1089,20 +1079,9 @@ internal sealed partial class MainForm : Form
             return;
         }
 
-        var outputPath = BuildOutputPath();
-        if (File.Exists(outputPath))
+        if (!TryPrepareRecordingOutput(out var outputPath))
         {
-            var overwrite = MessageBox.Show(
-                this,
-                $"A file named '{Path.GetFileName(outputPath)}' already exists.\n\nReplace it?",
-                "File Already Exists",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning);
-
-            if (overwrite != DialogResult.Yes)
-            {
-                return;
-            }
+            return;
         }
 
         try
@@ -1139,6 +1118,7 @@ internal sealed partial class MainForm : Form
             _activeOutputPath = null;
             _activeRecordingCustomer = null;
             _activeRecordingProject = null;
+            _activeRewriteHistoryItem = null;
             SetUiState(CaptureUiState.Ready);
 
             MessageBox.Show(
@@ -1263,6 +1243,7 @@ internal sealed partial class MainForm : Form
             _activeOutputPath = null;
             _activeRecordingCustomer = null;
             _activeRecordingProject = null;
+            _activeRewriteHistoryItem = null;
             ClearPreviewImage();
             SetUiState(CaptureUiState.Ready);
             LockRecordingControls(false);
@@ -1272,7 +1253,7 @@ internal sealed partial class MainForm : Form
 
     private string BuildOutputPath()
     {
-        return BuildOutputPath(SelectedCustomer!, SelectedProject!, _tapeLabelText.Text.Trim());
+        return BuildOutputPath(SelectedCustomer!, SelectedProject!, _tapeLabelText.Text);
     }
 
     private string BuildOutputPath(Customer customer, CustomerProject project, string tapeTitle)
@@ -1291,7 +1272,6 @@ internal sealed partial class MainForm : Form
             ? baseFolder
             : Path.Combine(baseFolder, customerFolder, projectFolder);
 
-        Directory.CreateDirectory(folder);
         return Path.Combine(folder, $"{tape}.mp4");
     }
 
@@ -1300,10 +1280,199 @@ internal sealed partial class MainForm : Form
         var invalid = Path.GetInvalidFileNameChars();
         var cleaned = new string(
             value.Select(character =>
-                    invalid.Contains(character) ? '_' : character)
+                    invalid.Contains(character) || "\\/:*?\"<>|".Contains(character) ? '_' : character)
                 .ToArray());
 
-        return cleaned.Trim().TrimEnd('.');
+        cleaned = cleaned.TrimEnd(' ', '.');
+        if (string.IsNullOrEmpty(cleaned))
+        {
+            throw new InvalidOperationException("The tape title does not produce a valid Windows filename.");
+        }
+
+        var reservedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        };
+        return reservedNames.Contains(cleaned) ? $"_{cleaned}" : cleaned;
+    }
+
+    private bool TryPrepareRecordingOutput(out string outputPath)
+    {
+        outputPath = string.Empty;
+        _activeRewriteHistoryItem = null;
+
+        while (true)
+        {
+            var title = _tapeLabelText.Text;
+            try
+            {
+                outputPath = BuildOutputPath();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Invalid Tape Title", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+
+            var duplicate = _historyItems.FirstOrDefault(item =>
+                item.ProjectId == SelectedProject!.Id &&
+                string.Equals(item.TapeLabel, title, StringComparison.OrdinalIgnoreCase));
+            if (duplicate is not null)
+            {
+                switch (ShowDuplicateTitleDialog(title))
+                {
+                    case DuplicateTitleChoice.RewriteExisting:
+                        if (MessageBox.Show(
+                                this,
+                                $"This will replace the existing recording for {title}. Are you sure?",
+                                "Rewrite Existing",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Warning,
+                                MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+                        {
+                            _activeRewriteHistoryItem = duplicate;
+                            return true;
+                        }
+                        return false;
+
+                    case DuplicateTitleChoice.RenameNewRecording:
+                        if (!TryRenameTapeTitle(title))
+                        {
+                            return false;
+                        }
+                        continue;
+
+                    default:
+                        return false;
+                }
+            }
+
+            var candidateOutputPath = outputPath;
+            var physicalCollision = _historyItems.FirstOrDefault(item =>
+                item.ProjectId == SelectedProject!.Id &&
+                string.Equals(item.OutputPath, candidateOutputPath, StringComparison.OrdinalIgnoreCase));
+            if (physicalCollision is not null || File.Exists(candidateOutputPath))
+            {
+                var message = physicalCollision is null
+                    ? $"The filename {Path.GetFileName(candidateOutputPath)} already exists in this project. Enter a different tape title."
+                    : $"The tape title {title} would use the same filename as {physicalCollision.TapeLabel}. Enter a different tape title.";
+                MessageBox.Show(this, message, "Filename Conflict", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (!TryRenameTapeTitle(title))
+                {
+                    return false;
+                }
+                continue;
+            }
+
+            return true;
+        }
+    }
+
+    private bool TryRenameTapeTitle(string title)
+    {
+        var suggestedTitle = GetSuggestedTitle(title);
+        var replacement = PromptForTapeTitle("Rename New Recording", "Tape title:", suggestedTitle);
+        if (replacement is null || string.IsNullOrWhiteSpace(replacement))
+        {
+            return false;
+        }
+
+        _tapeLabelText.Text = replacement;
+        return true;
+    }
+
+    private string GetSuggestedTitle(string title)
+    {
+        var suffix = 2;
+        while (true)
+        {
+            var candidate = $"{title} {suffix++}";
+            var titleExists = _historyItems.Any(item =>
+                item.ProjectId == SelectedProject!.Id &&
+                string.Equals(item.TapeLabel, candidate, StringComparison.OrdinalIgnoreCase));
+            if (titleExists)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (!File.Exists(BuildOutputPath(SelectedCustomer!, SelectedProject!, candidate)))
+                {
+                    return candidate;
+                }
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private DuplicateTitleChoice ShowDuplicateTitleDialog(string title)
+    {
+        using var dialog = new Form
+        {
+            Text = "Duplicate Tape Title",
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(520, 165),
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            BackColor = Color.FromArgb(34, 36, 39),
+            ForeColor = Color.WhiteSmoke
+        };
+        var message = new Label
+        {
+            Text = $"{title} already exists. What would you like to do?",
+            Location = new Point(16, 20),
+            Size = new Size(488, 46),
+            ForeColor = Color.WhiteSmoke
+        };
+        var rewrite = new Button { Text = "Rewrite Existing", Location = new Point(16, 110), Size = new Size(130, 30) };
+        var rename = new Button { Text = "Rename New Recording", Location = new Point(154, 110), Size = new Size(158, 30) };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(428, 110), Size = new Size(76, 30) };
+        rewrite.Click += (_, _) => dialog.DialogResult = DialogResult.Yes;
+        rename.Click += (_, _) => dialog.DialogResult = DialogResult.Retry;
+        dialog.Controls.AddRange([message, rewrite, rename, cancel]);
+        dialog.CancelButton = cancel;
+        return dialog.ShowDialog() switch
+        {
+            DialogResult.Yes => DuplicateTitleChoice.RewriteExisting,
+            DialogResult.Retry => DuplicateTitleChoice.RenameNewRecording,
+            _ => DuplicateTitleChoice.Cancel
+        };
+    }
+
+    private static string? PromptForTapeTitle(string title, string label, string initialValue)
+    {
+        using var dialog = new Form
+        {
+            Text = title,
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(420, 140),
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            BackColor = Color.FromArgb(34, 36, 39),
+            ForeColor = Color.WhiteSmoke
+        };
+        var caption = new Label { Text = label, Location = new Point(16, 16), AutoSize = true, ForeColor = Color.WhiteSmoke };
+        var input = new TextBox { Text = initialValue, Location = new Point(16, 42), Width = 388 };
+        var save = new Button { Text = "Use Title", DialogResult = DialogResult.OK, Location = new Point(248, 92), Width = 75 };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(329, 92), Width = 75 };
+        dialog.Controls.AddRange([caption, input, save, cancel]);
+        dialog.AcceptButton = save;
+        dialog.CancelButton = cancel;
+        return dialog.ShowDialog() == DialogResult.OK ? input.Text : null;
+    }
+
+    private enum DuplicateTitleChoice
+    {
+        RewriteExisting,
+        RenameNewRecording,
+        Cancel
     }
 
     private void BrowseForSaveFolder()
@@ -1443,6 +1612,7 @@ internal sealed partial class MainForm : Form
         _projectCombo.Enabled = !sessionActive;
         _manageCustomersButton.Enabled = !sessionActive;
         _tapeLabelText.Enabled = !sessionActive;
+        _nextUnlabeledButton.Enabled = !sessionActive;
         _saveFolderText.Enabled = !sessionActive;
         _browseButton.Enabled = !sessionActive;
         SetWorkflowEditingEnabled(!sessionActive);

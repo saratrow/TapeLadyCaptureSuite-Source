@@ -257,7 +257,7 @@ internal sealed partial class MainForm
     {
         var customer = SelectedCustomer;
         var project = SelectedProject;
-        var tape = _tapeLabelText.Text.Trim();
+        var tape = _tapeLabelText.Text;
         if (customer is null || project is null || string.IsNullOrWhiteSpace(tape))
         {
             MessageBox.Show(this, "Select a customer, project, and tape title first.", "Queue Item", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -343,7 +343,7 @@ internal sealed partial class MainForm
             return;
         }
 
-        var tape = _tapeLabelText.Text.Trim();
+        var tape = _tapeLabelText.Text;
         var item = _activeQueueItem ?? _queueItems.FirstOrDefault(q =>
             q.Status != "Completed" &&
             q.CustomerId == customer.Id &&
@@ -357,19 +357,32 @@ internal sealed partial class MainForm
             item.OutputPath = savedPath;
         }
 
-        _historyItems.Insert(0, new CaptureHistoryItem
+        var historyItem = _activeRewriteHistoryItem;
+        if (historyItem is null)
         {
-            CapturedAt = DateTime.Now,
-            CustomerId = customer.Id,
-            ProjectId = project.Id,
-            Customer = customer.FullName,
-            ProjectName = project.DisplayName,
-            TapeLabel = tape,
-            Notes = _notesText.Text.Trim(),
-            OutputPath = savedPath,
-            FileSizeBytes = File.Exists(savedPath) ? new FileInfo(savedPath).Length : 0
-        });
+            historyItem = new CaptureHistoryItem();
+            _historyItems.Insert(0, historyItem);
+        }
+
+        historyItem.CapturedAt = DateTime.Now;
+        historyItem.CustomerId = customer.Id;
+        historyItem.ProjectId = project.Id;
+        historyItem.Customer = customer.FullName;
+        historyItem.ProjectName = project.DisplayName;
+        historyItem.TapeLabel = tape;
+        historyItem.Notes = _notesText.Text.Trim();
+        historyItem.OutputPath = savedPath;
+        historyItem.FileSizeBytes = File.Exists(savedPath) ? new FileInfo(savedPath).Length : 0;
+        historyItem.ReviewStatus = CaptureReviewStatus.NeedsReview;
+        historyItem.OriginalDurationSeconds = null;
+        historyItem.FinalDurationSeconds = null;
+        historyItem.TrimStartSeconds = null;
+        historyItem.TrimEndSeconds = null;
+        historyItem.TrimMethod = null;
+        historyItem.ReviewedAt = null;
+
         _activeQueueItem = null;
+        _activeRewriteHistoryItem = null;
         RefreshQueueList();
         RefreshHistoryList();
         UpdateReviewVideosButton();
@@ -498,7 +511,16 @@ internal sealed partial class MainForm
             return;
         }
 
-        var targetPath = BuildOutputPath(details.Customer, details.Project, details.TapeTitle);
+        string targetPath;
+        try
+        {
+            targetPath = BuildOutputPath(details.Customer, details.Project, details.TapeTitle);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Invalid Tape Title", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
         if (!string.Equals(item.OutputPath, targetPath, StringComparison.OrdinalIgnoreCase))
         {
             if (File.Exists(targetPath))
@@ -603,6 +625,44 @@ internal sealed partial class MainForm
     private Customer? SelectedCustomer => _customerText.SelectedItem as Customer;
 
     private CustomerProject? SelectedProject => _projectCombo.SelectedItem as CustomerProject;
+
+    private void UseNextUnlabeledTitle()
+    {
+        if (SelectedProject is null)
+        {
+            MessageBox.Show(this, "Select a customer and project before choosing an unlabeled title.", "Next Unlabeled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var usedNumbers = _historyItems
+            .Where(item => item.ProjectId == SelectedProject.Id && File.Exists(item.OutputPath))
+            .Select(item => TryGetUnlabeledNumber(item.TapeLabel))
+            .Where(number => number.HasValue)
+            .Select(number => number!.Value)
+            .ToHashSet();
+        var next = 1;
+        while (usedNumbers.Contains(next))
+        {
+            next++;
+        }
+
+        _tapeLabelText.Text = $"Unlabeled {next}";
+        _tapeLabelText.Focus();
+        _tapeLabelText.SelectAll();
+    }
+
+    private static int? TryGetUnlabeledNumber(string title)
+    {
+        const string prefix = "Unlabeled ";
+        if (!title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+            !int.TryParse(title[prefix.Length..], out var number) ||
+            number < 1)
+        {
+            return null;
+        }
+
+        return number;
+    }
 
     private void RefreshCustomerProjectSelectors(Guid? customerId, Guid? projectId)
     {

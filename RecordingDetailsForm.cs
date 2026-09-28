@@ -12,7 +12,7 @@ internal sealed class RecordingDetailsForm : Form
 
     public Customer? Customer => _customerCombo.SelectedItem as Customer;
     public CustomerProject? Project => _projectCombo.SelectedItem as CustomerProject;
-    public string TapeTitle => _titleText.Text.Trim();
+    public string TapeTitle => _titleText.Text;
 
     public RecordingDetailsForm(
         List<Customer> customers,
