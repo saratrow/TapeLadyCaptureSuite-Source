@@ -61,13 +61,15 @@ internal sealed class CaptureHistoryItem
     public double? TrimEndSeconds { get; set; }
     public TrimMethod? TrimMethod { get; set; }
     public DateTime? ReviewedAt { get; set; }
+    public DateTime? DiscardedAt { get; set; }
 }
 
 internal enum CaptureReviewStatus
 {
     NeedsReview,
     CompleteTrimmed,
-    CompleteNoTrimNeeded
+    CompleteNoTrimNeeded,
+    Discarded
 }
 
 internal enum TrimMethod

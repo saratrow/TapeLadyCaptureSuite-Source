@@ -20,6 +20,7 @@ internal sealed partial class MainForm
     private readonly Button _openFileButton = new();
     private readonly Button _openFolderButton = new();
     private readonly Button _editDetailsButton = new();
+    private readonly Button _discardCaptureButton = new();
     private readonly Button _reviewVideosButton = new();
     private readonly Label _diskSpaceLabel = new();
     private QueueItem? _activeQueueItem;
@@ -128,9 +129,10 @@ internal sealed partial class MainForm
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
 
-        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
+        var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         header.Controls.Add(new Label
         {
             Text = "RECENT CAPTURES",
@@ -142,13 +144,17 @@ internal sealed partial class MainForm
         ConfigureWorkflowButton(_reviewVideosButton, "Review Videos (0)");
         _reviewVideosButton.Dock = DockStyle.Fill;
         header.Controls.Add(_reviewVideosButton, 1, 0);
+        ConfigureWorkflowButton(_discardCaptureButton, "Blank / TV / Do Not Keep");
+        _discardCaptureButton.Dock = DockStyle.Fill;
+        header.Controls.Add(_discardCaptureButton, 2, 0);
         root.Controls.Add(header, 0, 0);
 
         ConfigureListView(_historyList);
-        _historyList.Columns.Add("Date", 112);
-        _historyList.Columns.Add("Customer", 115);
-        _historyList.Columns.Add("Project", 92);
-        _historyList.Columns.Add("Tape", 115);
+        _historyList.Columns.Add("Status", 86);
+        _historyList.Columns.Add("Date", 92);
+        _historyList.Columns.Add("Customer", 80);
+        _historyList.Columns.Add("Project", 70);
+        _historyList.Columns.Add("Tape", 100);
         root.Controls.Add(_historyList, 0, 1);
 
         var buttons = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 };
@@ -201,6 +207,7 @@ internal sealed partial class MainForm
         _openFileButton.Click += (_, _) => OpenSelectedHistoryFile(false);
         _openFolderButton.Click += (_, _) => OpenSelectedHistoryFile(true);
         _editDetailsButton.Click += (_, _) => EditSelectedHistoryDetails();
+        _discardCaptureButton.Click += (_, _) => DiscardSelectedCapture();
         _historyList.DoubleClick += (_, _) => OpenSelectedHistoryFile(false);
         _reviewVideosButton.Click += (_, _) => ShowReviewVideos();
         _saveFolderText.TextChanged += (_, _) => UpdateDiskSpaceLabel();
@@ -257,7 +264,7 @@ internal sealed partial class MainForm
     {
         var customer = SelectedCustomer;
         var project = SelectedProject;
-        var tape = _tapeLabelText.Text;
+        var tape = _activeRecordingTapeTitle ?? _tapeLabelText.Text;
         if (customer is null || project is null || string.IsNullOrWhiteSpace(tape))
         {
             MessageBox.Show(this, "Select a customer, project, and tape title first.", "Queue Item", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -380,6 +387,7 @@ internal sealed partial class MainForm
         historyItem.TrimEndSeconds = null;
         historyItem.TrimMethod = null;
         historyItem.ReviewedAt = null;
+        historyItem.DiscardedAt = null;
 
         _activeQueueItem = null;
         _activeRewriteHistoryItem = null;
@@ -411,7 +419,8 @@ internal sealed partial class MainForm
         _historyList.Items.Clear();
         foreach (var item in _historyItems.OrderByDescending(h => h.CapturedAt).Take(500))
         {
-            var row = new ListViewItem(item.CapturedAt.ToString("MM/dd/yy HH:mm")) { Tag = item };
+            var row = new ListViewItem(HistoryStatusText(item.ReviewStatus)) { Tag = item };
+            row.SubItems.Add(item.CapturedAt.ToString("MM/dd/yy HH:mm"));
             row.SubItems.Add(item.Customer);
             row.SubItems.Add(item.ProjectName);
             row.SubItems.Add(item.TapeLabel);
@@ -420,6 +429,15 @@ internal sealed partial class MainForm
         _historyList.EndUpdate();
         UpdateReviewVideosButton();
     }
+
+    private static string HistoryStatusText(CaptureReviewStatus status) => status switch
+    {
+        CaptureReviewStatus.NeedsReview => "Needs Review",
+        CaptureReviewStatus.CompleteTrimmed => "Complete - Trimmed",
+        CaptureReviewStatus.CompleteNoTrimNeeded => "Complete - No Trim",
+        CaptureReviewStatus.Discarded => "Discarded",
+        _ => status.ToString()
+    };
 
     private void UpdateReviewVideosButton()
     {
@@ -495,6 +513,46 @@ internal sealed partial class MainForm
             return;
         }
         Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+    }
+
+    private void DiscardSelectedCapture()
+    {
+        var item = SelectedHistoryItem();
+        if (item is null || item.ReviewStatus == CaptureReviewStatus.Discarded)
+        {
+            return;
+        }
+
+        var prompt = $"Discard this capture?\n\n{item.Customer} - {item.ProjectName}\n{item.TapeLabel}\n\n" +
+            "The finished MP4 will be permanently deleted. Any Originals file will remain untouched.";
+        if (MessageBox.Show(
+                this,
+                prompt,
+                "Blank / TV / Do Not Keep",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(item.OutputPath))
+            {
+                File.Delete(item.OutputPath);
+            }
+
+            item.FileSizeBytes = 0;
+            item.ReviewStatus = CaptureReviewStatus.Discarded;
+            item.DiscardedAt = DateTime.Now;
+            PersistWorkflowState();
+            RefreshHistoryList();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Unable to Discard Capture", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void EditSelectedHistoryDetails()
@@ -826,5 +884,6 @@ internal sealed partial class MainForm
         _deleteQueueButton.Enabled = enabled;
         _queueList.Enabled = enabled;
         _notesText.Enabled = enabled;
+        _discardCaptureButton.Enabled = enabled;
     }
 }

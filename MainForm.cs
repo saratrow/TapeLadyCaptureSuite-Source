@@ -53,6 +53,7 @@ internal sealed partial class MainForm : Form
     private string? _ffmpegPath;
     private Customer? _activeRecordingCustomer;
     private CustomerProject? _activeRecordingProject;
+    private string? _activeRecordingTapeTitle;
     private CaptureHistoryItem? _activeRewriteHistoryItem;
     private bool _closing;
 
@@ -1097,6 +1098,7 @@ internal sealed partial class MainForm : Form
             _activeOutputPath = outputPath;
             _activeRecordingCustomer = SelectedCustomer;
             _activeRecordingProject = SelectedProject;
+            _activeRecordingTapeTitle = _tapeLabelText.Text;
             _recordingStarted = DateTime.Now;
             _pausedDuration = TimeSpan.Zero;
             _pauseStarted = null;
@@ -1118,6 +1120,7 @@ internal sealed partial class MainForm : Form
             _activeOutputPath = null;
             _activeRecordingCustomer = null;
             _activeRecordingProject = null;
+            _activeRecordingTapeTitle = null;
             _activeRewriteHistoryItem = null;
             SetUiState(CaptureUiState.Ready);
 
@@ -1243,6 +1246,7 @@ internal sealed partial class MainForm : Form
             _activeOutputPath = null;
             _activeRecordingCustomer = null;
             _activeRecordingProject = null;
+            _activeRecordingTapeTitle = null;
             _activeRewriteHistoryItem = null;
             ClearPreviewImage();
             SetUiState(CaptureUiState.Ready);
