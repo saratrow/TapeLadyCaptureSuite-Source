@@ -30,7 +30,9 @@ internal sealed partial class MainForm : Form
     private readonly Button _stopButton = new();
     private readonly Button _fullScreenButton = new();
     private readonly Button _browseButton = new();
-    private readonly TextBox _customerText = new();
+    private readonly ComboBox _customerText = new();
+    private readonly ComboBox _projectCombo = new();
+    private readonly Button _manageCustomersButton = new();
     private readonly TextBox _tapeLabelText = new();
     private readonly TextBox _saveFolderText = new();
     private readonly Label _statusText = new();
@@ -48,6 +50,8 @@ internal sealed partial class MainForm : Form
     private Form? _fullScreenForm;
     private string? _activeOutputPath;
     private string? _ffmpegPath;
+    private Customer? _activeRecordingCustomer;
+    private CustomerProject? _activeRecordingProject;
     private bool _closing;
 
     private enum CaptureUiState
@@ -63,7 +67,7 @@ internal sealed partial class MainForm : Form
     {
         _reviewWorkQueue = new ReviewWorkQueue(() => _captureState is CaptureUiState.Recording
             or CaptureUiState.Paused or CaptureUiState.Finalizing);
-        Text = "Tape Lady Capture Suite — Milestone 5.2";
+        Text = "Tape Lady Capture Suite";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(1280, 780);
         Size = new Size(1580, 900);
@@ -211,7 +215,7 @@ internal sealed partial class MainForm : Form
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 11,
+            ColumnCount = 10,
             RowCount = 2,
             Padding = new Padding(10, 6, 10, 6),
             BackColor = Color.FromArgb(52, 55, 59)
@@ -267,38 +271,49 @@ internal sealed partial class MainForm : Form
         var panel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 8,
+            ColumnCount = 11,
             RowCount = 2,
             Padding = new Padding(10, 8, 10, 8),
             BackColor = Color.FromArgb(42, 44, 47)
         };
 
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 74));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 82));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 65));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 47));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 86));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 6));
 
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
 
         AddJobLabel(panel, "Customer", 0);
-        AddJobLabel(panel, "Tape Label", 2);
-        AddJobLabel(panel, "Save Folder", 4);
+        AddJobLabel(panel, "Project", 2);
+        AddJobLabel(panel, "Tape Title", 4);
+        AddJobLabel(panel, "Save Folder", 7);
 
-        ConfigureTextBox(_customerText);
+        ConfigureCombo(_customerText);
+        _customerText.DropDownStyle = ComboBoxStyle.DropDown;
+        _customerText.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+        _customerText.AutoCompleteSource = AutoCompleteSource.ListItems;
+        ConfigureCombo(_projectCombo);
+        _projectCombo.DropDownStyle = ComboBoxStyle.DropDownList;
         ConfigureTextBox(_tapeLabelText);
         ConfigureTextBox(_saveFolderText);
 
         panel.Controls.Add(_customerText, 1, 1);
-        panel.Controls.Add(_tapeLabelText, 3, 1);
-        panel.Controls.Add(_saveFolderText, 5, 1);
+        panel.Controls.Add(_projectCombo, 3, 1);
+        panel.Controls.Add(_tapeLabelText, 5, 1);
+        panel.Controls.Add(_saveFolderText, 8, 1);
 
+        ConfigureSmallButton(_manageCustomersButton, "Customers / Projects");
         ConfigureSmallButton(_browseButton, "Browse...");
-        panel.Controls.Add(_browseButton, 6, 1);
+        panel.Controls.Add(_manageCustomersButton, 6, 1);
+        panel.Controls.Add(_browseButton, 9, 1);
 
         return panel;
     }
@@ -658,6 +673,9 @@ internal sealed partial class MainForm : Form
         _stopButton.Click += async (_, _) => await StopRecordingAsync();
         _fullScreenButton.Click += (_, _) => ShowFullScreenPreview();
         _browseButton.Click += (_, _) => BrowseForSaveFolder();
+        _manageCustomersButton.Click += (_, _) => ShowCustomerProjectManager();
+        _customerText.SelectionChangeCommitted += (_, _) => SelectCustomer(_customerText.SelectedItem as Customer);
+        _projectCombo.SelectionChangeCommitted += (_, _) => SelectProject(_projectCombo.SelectedItem as CustomerProject);
 
         _previewService.FrameReady += PreviewService_FrameReady;
         _previewService.PreviewError += (_, message) =>
@@ -1060,6 +1078,17 @@ internal sealed partial class MainForm : Form
             return;
         }
 
+        if (SelectedCustomer is null || SelectedProject is null)
+        {
+            MessageBox.Show(
+                this,
+                "Select a customer and project before recording.",
+                "Customer and Project Required",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+
         var outputPath = BuildOutputPath();
         if (File.Exists(outputPath))
         {
@@ -1087,6 +1116,8 @@ internal sealed partial class MainForm : Form
             _fullScreenButton.Enabled = true;
 
             _activeOutputPath = outputPath;
+            _activeRecordingCustomer = SelectedCustomer;
+            _activeRecordingProject = SelectedProject;
             _recordingStarted = DateTime.Now;
             _pausedDuration = TimeSpan.Zero;
             _pauseStarted = null;
@@ -1106,6 +1137,8 @@ internal sealed partial class MainForm : Form
         catch (Exception ex)
         {
             _activeOutputPath = null;
+            _activeRecordingCustomer = null;
+            _activeRecordingProject = null;
             SetUiState(CaptureUiState.Ready);
 
             MessageBox.Show(
@@ -1228,6 +1261,8 @@ internal sealed partial class MainForm : Form
         finally
         {
             _activeOutputPath = null;
+            _activeRecordingCustomer = null;
+            _activeRecordingProject = null;
             ClearPreviewImage();
             SetUiState(CaptureUiState.Ready);
             LockRecordingControls(false);
@@ -1237,18 +1272,24 @@ internal sealed partial class MainForm : Form
 
     private string BuildOutputPath()
     {
+        return BuildOutputPath(SelectedCustomer!, SelectedProject!, _tapeLabelText.Text.Trim());
+    }
+
+    private string BuildOutputPath(Customer customer, CustomerProject project, string tapeTitle)
+    {
         var baseFolder = string.IsNullOrWhiteSpace(_saveFolderText.Text)
             ? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
                 "Tape Lady Captures")
             : _saveFolderText.Text.Trim();
 
-        var customer = SanitizeFileName(_customerText.Text.Trim());
-        var tape = SanitizeFileName(_tapeLabelText.Text.Trim());
+        var customerFolder = SanitizeFileName(customer.FullName);
+        var projectFolder = SanitizeFileName(project.DisplayName);
+        var tape = SanitizeFileName(tapeTitle);
 
-        var folder = string.IsNullOrWhiteSpace(customer)
+        var folder = string.IsNullOrWhiteSpace(customerFolder)
             ? baseFolder
-            : Path.Combine(baseFolder, customer);
+            : Path.Combine(baseFolder, customerFolder, projectFolder);
 
         Directory.CreateDirectory(folder);
         return Path.Combine(folder, $"{tape}.mp4");
@@ -1399,6 +1440,8 @@ internal sealed partial class MainForm : Form
         _refreshButton.Enabled = !sessionActive;
         _startPreviewButton.Enabled = !sessionActive;
         _customerText.Enabled = !sessionActive;
+        _projectCombo.Enabled = !sessionActive;
+        _manageCustomersButton.Enabled = !sessionActive;
         _tapeLabelText.Enabled = !sessionActive;
         _saveFolderText.Enabled = !sessionActive;
         _browseButton.Enabled = !sessionActive;

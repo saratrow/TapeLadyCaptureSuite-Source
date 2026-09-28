@@ -6,6 +6,8 @@ namespace TapeLadyCaptureSuite;
 
 internal sealed partial class MainForm
 {
+    private readonly List<Customer> _customers = [];
+    private readonly List<CustomerProject> _projects = [];
     private readonly List<QueueItem> _queueItems = [];
     private readonly List<CaptureHistoryItem> _historyItems = [];
     private readonly ListView _queueList = new();
@@ -17,6 +19,7 @@ internal sealed partial class MainForm
     private readonly Button _deleteQueueButton = new();
     private readonly Button _openFileButton = new();
     private readonly Button _openFolderButton = new();
+    private readonly Button _editDetailsButton = new();
     private readonly Button _reviewVideosButton = new();
     private readonly Label _diskSpaceLabel = new();
     private QueueItem? _activeQueueItem;
@@ -69,6 +72,7 @@ internal sealed partial class MainForm
         ConfigureListView(_queueList);
         _queueList.Columns.Add("Status", 74);
         _queueList.Columns.Add("Customer", 125);
+        _queueList.Columns.Add("Project", 92);
         _queueList.Columns.Add("Tape", 120);
 
         var notesLabel = new Label
@@ -143,16 +147,20 @@ internal sealed partial class MainForm
         ConfigureListView(_historyList);
         _historyList.Columns.Add("Date", 112);
         _historyList.Columns.Add("Customer", 115);
+        _historyList.Columns.Add("Project", 92);
         _historyList.Columns.Add("Tape", 115);
         root.Controls.Add(_historyList, 0, 1);
 
-        var buttons = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
-        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        var buttons = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 };
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.34F));
         ConfigureWorkflowButton(_openFileButton, "Play File");
         ConfigureWorkflowButton(_openFolderButton, "Open Folder");
+        ConfigureWorkflowButton(_editDetailsButton, "Edit Details");
         buttons.Controls.Add(_openFileButton, 0, 0);
         buttons.Controls.Add(_openFolderButton, 1, 0);
+        buttons.Controls.Add(_editDetailsButton, 2, 0);
         root.Controls.Add(buttons, 0, 2);
         return root;
     }
@@ -192,6 +200,7 @@ internal sealed partial class MainForm
         _notesText.TextChanged += (_, _) => SaveNotesForSelection();
         _openFileButton.Click += (_, _) => OpenSelectedHistoryFile(false);
         _openFolderButton.Click += (_, _) => OpenSelectedHistoryFile(true);
+        _editDetailsButton.Click += (_, _) => EditSelectedHistoryDetails();
         _historyList.DoubleClick += (_, _) => OpenSelectedHistoryFile(false);
         _reviewVideosButton.Click += (_, _) => ShowReviewVideos();
         _saveFolderText.TextChanged += (_, _) => UpdateDiskSpaceLabel();
@@ -200,6 +209,10 @@ internal sealed partial class MainForm
     private void RestoreWorkflowState()
     {
         var state = AppStateService.Load();
+        _customers.Clear();
+        _customers.AddRange(state.Customers);
+        _projects.Clear();
+        _projects.AddRange(state.Projects);
         _queueItems.Clear();
         _queueItems.AddRange(state.Queue);
         _historyItems.Clear();
@@ -211,6 +224,8 @@ internal sealed partial class MainForm
         }
         TrySelectText(_videoDeviceCombo, state.PreferredVideoDevice);
         TrySelectText(_audioDeviceCombo, state.PreferredAudioDevice);
+        MigrateLegacyOwnership();
+        RefreshCustomerProjectSelectors(null, null);
         RefreshQueueList();
         RefreshHistoryList();
         UpdateReviewVideosButton();
@@ -226,6 +241,8 @@ internal sealed partial class MainForm
                 SaveFolder = _saveFolderText.Text.Trim(),
                 PreferredVideoDevice = _videoDeviceCombo.SelectedItem?.ToString() ?? string.Empty,
                 PreferredAudioDevice = _audioDeviceCombo.SelectedItem?.ToString() ?? string.Empty,
+                Customers = _customers,
+                Projects = _projects,
                 Queue = _queueItems,
                 History = _historyItems
             });
@@ -238,15 +255,24 @@ internal sealed partial class MainForm
 
     private void AddCurrentToQueue()
     {
-        var customer = _customerText.Text.Trim();
+        var customer = SelectedCustomer;
+        var project = SelectedProject;
         var tape = _tapeLabelText.Text.Trim();
-        if (string.IsNullOrWhiteSpace(customer) || string.IsNullOrWhiteSpace(tape))
+        if (customer is null || project is null || string.IsNullOrWhiteSpace(tape))
         {
-            MessageBox.Show(this, "Enter both a customer and tape label first.", "Queue Item", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "Select a customer, project, and tape title first.", "Queue Item", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        _queueItems.Add(new QueueItem { Customer = customer, TapeLabel = tape, Notes = _notesText.Text.Trim() });
+        _queueItems.Add(new QueueItem
+        {
+            CustomerId = customer.Id,
+            ProjectId = project.Id,
+            Customer = customer.FullName,
+            ProjectName = project.DisplayName,
+            TapeLabel = tape,
+            Notes = _notesText.Text.Trim()
+        });
         RefreshQueueList();
         PersistWorkflowState();
     }
@@ -264,7 +290,8 @@ internal sealed partial class MainForm
         var item = SelectedQueueItem();
         if (item is null) return;
         _activeQueueItem = item;
-        _customerText.Text = item.Customer;
+        SelectCustomer(_customers.FirstOrDefault(customer => customer.Id == item.CustomerId));
+        SelectProject(_projects.FirstOrDefault(project => project.Id == item.ProjectId));
         _tapeLabelText.Text = item.TapeLabel;
         _notesText.Text = item.Notes;
     }
@@ -309,11 +336,18 @@ internal sealed partial class MainForm
 
     private void CompleteActiveQueueItem(string savedPath)
     {
-        var customer = _customerText.Text.Trim();
+        var customer = _activeRecordingCustomer ?? SelectedCustomer;
+        var project = _activeRecordingProject ?? SelectedProject;
+        if (customer is null || project is null)
+        {
+            return;
+        }
+
         var tape = _tapeLabelText.Text.Trim();
         var item = _activeQueueItem ?? _queueItems.FirstOrDefault(q =>
             q.Status != "Completed" &&
-            string.Equals(q.Customer, customer, StringComparison.OrdinalIgnoreCase) &&
+            q.CustomerId == customer.Id &&
+            q.ProjectId == project.Id &&
             string.Equals(q.TapeLabel, tape, StringComparison.OrdinalIgnoreCase));
 
         if (item is not null)
@@ -326,7 +360,10 @@ internal sealed partial class MainForm
         _historyItems.Insert(0, new CaptureHistoryItem
         {
             CapturedAt = DateTime.Now,
-            Customer = customer,
+            CustomerId = customer.Id,
+            ProjectId = project.Id,
+            Customer = customer.FullName,
+            ProjectName = project.DisplayName,
             TapeLabel = tape,
             Notes = _notesText.Text.Trim(),
             OutputPath = savedPath,
@@ -347,6 +384,7 @@ internal sealed partial class MainForm
         {
             var row = new ListViewItem(item.Status == "Completed" ? "✓ Done" : "Pending") { Tag = item };
             row.SubItems.Add(item.Customer);
+            row.SubItems.Add(item.ProjectName);
             row.SubItems.Add(item.TapeLabel);
             if (item.Status == "Completed") row.ForeColor = Color.FromArgb(150, 205, 155);
             _queueList.Items.Add(row);
@@ -362,6 +400,7 @@ internal sealed partial class MainForm
         {
             var row = new ListViewItem(item.CapturedAt.ToString("MM/dd/yy HH:mm")) { Tag = item };
             row.SubItems.Add(item.Customer);
+            row.SubItems.Add(item.ProjectName);
             row.SubItems.Add(item.TapeLabel);
             _historyList.Items.Add(row);
         }
@@ -445,6 +484,103 @@ internal sealed partial class MainForm
         Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
     }
 
+    private void EditSelectedHistoryDetails()
+    {
+        var item = SelectedHistoryItem();
+        if (item is null)
+        {
+            return;
+        }
+
+        using var details = new RecordingDetailsForm(_customers, _projects, item);
+        if (details.ShowDialog(this) != DialogResult.OK || details.Customer is null || details.Project is null)
+        {
+            return;
+        }
+
+        var targetPath = BuildOutputPath(details.Customer, details.Project, details.TapeTitle);
+        if (!string.Equals(item.OutputPath, targetPath, StringComparison.OrdinalIgnoreCase))
+        {
+            if (File.Exists(targetPath))
+            {
+                MessageBox.Show(this, "A recording already exists at the corrected customer, project, and title. Details were not changed.", "Edit Details", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var titleChanged = !string.Equals(item.TapeLabel, details.TapeTitle, StringComparison.Ordinal);
+            var locationChanged = item.CustomerId != details.Customer.Id || item.ProjectId != details.Project.Id;
+            var confirmation = titleChanged && locationChanged
+                ? "This will move and rename the saved recording. Continue?"
+                : locationChanged
+                    ? "This will move the saved recording to the selected customer/project folder. Continue?"
+                    : "This will rename the saved recording. Continue?";
+
+            if (MessageBox.Show(this, confirmation, "Update Recording", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            try
+            {
+                MoveRecordingFiles(item, targetPath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Unable to Move Recording", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+        }
+
+        item.CustomerId = details.Customer.Id;
+        item.ProjectId = details.Project.Id;
+        item.Customer = details.Customer.FullName;
+        item.ProjectName = details.Project.DisplayName;
+        item.TapeLabel = details.TapeTitle;
+        PersistWorkflowState();
+        RefreshHistoryList();
+    }
+
+    private static void MoveRecordingFiles(CaptureHistoryItem item, string targetPath)
+    {
+        if (!File.Exists(item.OutputPath))
+        {
+            throw new FileNotFoundException("The saved recording is no longer available.", item.OutputPath);
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        var sourcePath = item.OutputPath;
+        var sourceBackupPath = item.OriginalBackupPath;
+        string? targetBackupPath = null;
+        if (!string.IsNullOrWhiteSpace(sourceBackupPath) && File.Exists(sourceBackupPath))
+        {
+            targetBackupPath = Path.Combine(Path.GetDirectoryName(targetPath)!, "Originals", Path.GetFileName(targetPath));
+            if (File.Exists(targetBackupPath))
+            {
+                throw new IOException("An original backup already exists at the corrected project location.");
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(targetBackupPath)!);
+        }
+
+        File.Move(sourcePath, targetPath);
+        try
+        {
+            if (targetBackupPath is not null && sourceBackupPath is not null)
+            {
+                File.Move(sourceBackupPath, targetBackupPath);
+                item.OriginalBackupPath = targetBackupPath;
+            }
+            item.OutputPath = targetPath;
+        }
+        catch
+        {
+            if (File.Exists(targetPath) && !File.Exists(sourcePath))
+            {
+                File.Move(targetPath, sourcePath);
+            }
+            throw;
+        }
+    }
+
     private void UpdateDiskSpaceLabel()
     {
         try
@@ -461,6 +597,164 @@ internal sealed partial class MainForm
         catch
         {
             _diskSpaceLabel.Text = "Free space: unavailable";
+        }
+    }
+
+    private Customer? SelectedCustomer => _customerText.SelectedItem as Customer;
+
+    private CustomerProject? SelectedProject => _projectCombo.SelectedItem as CustomerProject;
+
+    private void RefreshCustomerProjectSelectors(Guid? customerId, Guid? projectId)
+    {
+        _customerText.BeginUpdate();
+        _customerText.Items.Clear();
+        foreach (var customer in _customers.OrderBy(customer => customer.FullName))
+        {
+            _customerText.Items.Add(customer);
+        }
+        _customerText.EndUpdate();
+
+        SelectComboItem<Customer>(_customerText, customerId, customer => customer.Id);
+        RefreshProjectSelector(customerId, projectId);
+    }
+
+    private void RefreshProjectSelector(Guid? customerId, Guid? projectId)
+    {
+        _projectCombo.BeginUpdate();
+        _projectCombo.Items.Clear();
+        if (customerId.HasValue)
+        {
+            foreach (var project in _projects
+                         .Where(project => project.CustomerId == customerId.Value)
+                         .OrderByDescending(project => project.DropOffDate))
+            {
+                _projectCombo.Items.Add(project);
+            }
+        }
+        _projectCombo.EndUpdate();
+        SelectComboItem<CustomerProject>(_projectCombo, projectId, project => project.Id);
+    }
+
+    private static void SelectComboItem<T>(ComboBox combo, Guid? id, Func<T, Guid> getId)
+    {
+        combo.SelectedIndex = -1;
+        if (!id.HasValue)
+        {
+            return;
+        }
+
+        for (var index = 0; index < combo.Items.Count; index++)
+        {
+            if (combo.Items[index] is T item && getId(item) == id.Value)
+            {
+                combo.SelectedIndex = index;
+                return;
+            }
+        }
+    }
+
+    private void SelectCustomer(Customer? customer)
+    {
+        SelectComboItem<Customer>(_customerText, customer?.Id, item => item.Id);
+        RefreshProjectSelector(customer?.Id, null);
+    }
+
+    private void SelectProject(CustomerProject? project)
+    {
+        if (project is null)
+        {
+            SelectComboItem<CustomerProject>(_projectCombo, null, item => item.Id);
+            return;
+        }
+
+        var customer = _customers.FirstOrDefault(item => item.Id == project.CustomerId);
+        SelectComboItem<Customer>(_customerText, customer?.Id, item => item.Id);
+        RefreshProjectSelector(project.CustomerId, project.Id);
+    }
+
+    private void ShowCustomerProjectManager()
+    {
+        using var manager = new CustomerProjectForm(
+            _customers,
+            _projects,
+            SelectedCustomer,
+            SelectedProject);
+        var result = manager.ShowDialog(this);
+
+        if (manager.StateChanged)
+        {
+            PersistWorkflowState();
+        }
+
+        if (result == DialogResult.OK &&
+            manager.SelectedCustomer is not null &&
+            manager.SelectedProject is not null)
+        {
+            RefreshCustomerProjectSelectors(manager.SelectedCustomer.Id, manager.SelectedProject.Id);
+        }
+        else
+        {
+            RefreshCustomerProjectSelectors(SelectedCustomer?.Id, SelectedProject?.Id);
+        }
+    }
+
+    private void MigrateLegacyOwnership()
+    {
+        foreach (var item in _queueItems)
+        {
+            var customerId = item.CustomerId;
+            var projectId = item.ProjectId;
+            EnsureOwnership(item.Customer, item.ProjectName, item.CreatedAt, ref customerId, ref projectId);
+            item.CustomerId = customerId;
+            item.ProjectId = projectId;
+        }
+
+        foreach (var item in _historyItems)
+        {
+            var customerId = item.CustomerId;
+            var projectId = item.ProjectId;
+            EnsureOwnership(item.Customer, item.ProjectName, item.CapturedAt, ref customerId, ref projectId);
+            item.CustomerId = customerId;
+            item.ProjectId = projectId;
+        }
+    }
+
+    private void EnsureOwnership(
+        string customerName,
+        string projectName,
+        DateTime date,
+        ref Guid? customerId,
+        ref Guid? projectId)
+    {
+        if (!customerId.HasValue)
+        {
+            var customer = _customers.FirstOrDefault(item =>
+                string.Equals(item.FullName, customerName, StringComparison.OrdinalIgnoreCase));
+            if (customer is null)
+            {
+                customer = new Customer { FullName = string.IsNullOrWhiteSpace(customerName) ? "Unassigned" : customerName };
+                _customers.Add(customer);
+            }
+            customerId = customer.Id;
+        }
+
+        if (!projectId.HasValue)
+        {
+            var resolvedCustomerId = customerId.Value;
+            var project = _projects.FirstOrDefault(item =>
+                item.CustomerId == resolvedCustomerId &&
+                string.Equals(item.DisplayName, projectName, StringComparison.OrdinalIgnoreCase));
+            if (project is null)
+            {
+                project = new CustomerProject
+                {
+                    CustomerId = resolvedCustomerId,
+                    DropOffDate = date.Date,
+                    Name = string.IsNullOrWhiteSpace(projectName) ? null : projectName
+                };
+                _projects.Add(project);
+            }
+            projectId = project.Id;
         }
     }
 
