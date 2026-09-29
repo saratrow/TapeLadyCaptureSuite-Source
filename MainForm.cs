@@ -265,7 +265,7 @@ internal sealed partial class MainForm : Form
 
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 52));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62));
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
@@ -666,7 +666,7 @@ internal sealed partial class MainForm : Form
         _manageCustomersButton.Click += (_, _) => ShowCustomerProjectManager();
         _nextUnlabeledButton.Click += (_, _) => UseNextUnlabeledTitle();
         _customerText.SelectionChangeCommitted += (_, _) => SelectCustomer(_customerText.SelectedItem as Customer);
-        _projectCombo.SelectionChangeCommitted += (_, _) => SelectProject(_projectCombo.SelectedItem as CustomerProject);
+        _projectCombo.SelectionChangeCommitted += (_, _) => SelectProjectFromCombo();
 
         _previewService.FrameReady += PreviewService_FrameReady;
         _previewService.PreviewError += (_, message) =>

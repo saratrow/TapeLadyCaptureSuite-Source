@@ -25,6 +25,9 @@ internal sealed partial class MainForm
     private readonly Label _diskSpaceLabel = new();
     private QueueItem? _activeQueueItem;
     private ReviewTrimForm? _reviewTrimForm;
+    private int _historySortColumn = 1;
+    private bool _historySortDescending = true;
+    private readonly NewProjectChoice _newProjectChoice = new();
 
     private Control BuildWorkflowPanel()
     {
@@ -155,6 +158,7 @@ internal sealed partial class MainForm
         _historyList.Columns.Add("Customer", 80);
         _historyList.Columns.Add("Project", 70);
         _historyList.Columns.Add("Tape", 100);
+        _historyList.ColumnClick += (_, eventArgs) => ChangeHistorySort(eventArgs.Column);
         root.Controls.Add(_historyList, 0, 1);
 
         var buttons = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 };
@@ -181,7 +185,7 @@ internal sealed partial class MainForm
         list.BackColor = Color.FromArgb(24, 26, 28);
         list.ForeColor = Color.WhiteSmoke;
         list.BorderStyle = BorderStyle.FixedSingle;
-        list.HeaderStyle = ColumnHeaderStyle.Nonclickable;
+        list.HeaderStyle = ColumnHeaderStyle.Clickable;
     }
 
     private static void ConfigureWorkflowButton(Button button, string text)
@@ -415,35 +419,92 @@ internal sealed partial class MainForm
 
     private void RefreshHistoryList()
     {
+        CaptureHistoryItem? desired = SelectedHistoryItem();
         _historyList.BeginUpdate();
         _historyList.Items.Clear();
-        foreach (var item in _historyItems.OrderByDescending(h => h.CapturedAt).Take(500))
+        foreach (CaptureHistoryItem item in SortedHistoryItems().Take(500))
         {
-            var row = new ListViewItem(HistoryStatusText(item.ReviewStatus)) { Tag = item };
+            var row = new ListViewItem(HistoryStatusText(item)) { Tag = item };
             row.SubItems.Add(item.CapturedAt.ToString("MM/dd/yy HH:mm"));
             row.SubItems.Add(item.Customer);
             row.SubItems.Add(item.ProjectName);
             row.SubItems.Add(item.TapeLabel);
             _historyList.Items.Add(row);
+            if (ReferenceEquals(item, desired))
+            {
+                row.Selected = true;
+            }
         }
         _historyList.EndUpdate();
         UpdateReviewVideosButton();
     }
 
-    private static string HistoryStatusText(CaptureReviewStatus status) => status switch
+    private void ChangeHistorySort(int column)
     {
-        CaptureReviewStatus.NeedsReview => "Needs Review",
-        CaptureReviewStatus.CompleteTrimmed => "Complete - Trimmed",
-        CaptureReviewStatus.CompleteNoTrimNeeded => "Complete - No Trim",
-        CaptureReviewStatus.Discarded => "Discarded",
-        _ => status.ToString()
+        if (_historySortColumn == column)
+        {
+            _historySortDescending = !_historySortDescending;
+        }
+        else
+        {
+            _historySortColumn = column;
+            _historySortDescending = false;
+        }
+
+        RefreshHistoryList();
+    }
+
+    private IEnumerable<CaptureHistoryItem> SortedHistoryItems() => _historySortColumn switch
+    {
+        0 => CaptureHistoryDisplaySort.ByText(_historyItems, HistoryStatusText, _historySortDescending),
+        1 => CaptureHistoryDisplaySort.ByKey(_historyItems, item => item.CapturedAt, _historySortDescending),
+        2 => CaptureHistoryDisplaySort.ByText(_historyItems, item => item.Customer, _historySortDescending),
+        3 => SortedHistoryProjects(),
+        4 => CaptureHistoryDisplaySort.ByText(_historyItems, item => item.TapeLabel, _historySortDescending),
+        _ => _historyItems
     };
+
+    private IEnumerable<CaptureHistoryItem> SortedHistoryProjects()
+    {
+        var items = _historyItems.Select(item => new
+        {
+            Item = item,
+            Project = _projects.FirstOrDefault(project => project.Id == item.ProjectId)
+        });
+        return _historySortDescending
+            ? items.OrderByDescending(entry => entry.Project?.DropOffDate ?? DateTime.MinValue)
+                .ThenByDescending(entry => entry.Item.ProjectName, StringComparer.OrdinalIgnoreCase)
+                .Select(entry => entry.Item)
+            : items.OrderBy(entry => entry.Project?.DropOffDate ?? DateTime.MaxValue)
+                .ThenBy(entry => entry.Item.ProjectName, StringComparer.OrdinalIgnoreCase)
+                .Select(entry => entry.Item);
+    }
+
+    private static string HistoryStatusText(CaptureHistoryItem item)
+    {
+        if (item.ReviewStatus == CaptureReviewStatus.NeedsReview && !File.Exists(item.OutputPath))
+        {
+            return "Missing File";
+        }
+
+        return item.ReviewStatus switch
+        {
+            CaptureReviewStatus.NeedsReview => "Needs Review",
+            CaptureReviewStatus.CompleteTrimmed => "Complete - Trimmed",
+            CaptureReviewStatus.CompleteNoTrimNeeded => "Complete - No Trim",
+            CaptureReviewStatus.Discarded => "Discarded",
+            _ => item.ReviewStatus.ToString()
+        };
+    }
 
     private void UpdateReviewVideosButton()
     {
-        int needsReview = _historyItems.Count(item => item.ReviewStatus == CaptureReviewStatus.NeedsReview);
+        int needsReview = _historyItems.Count(IsReviewableNeedsReview);
         _reviewVideosButton.Text = $"Review Videos ({needsReview})";
     }
+
+    private static bool IsReviewableNeedsReview(CaptureHistoryItem item) =>
+        item.ReviewStatus == CaptureReviewStatus.NeedsReview && File.Exists(item.OutputPath);
 
     private void ShowReviewVideos()
     {
@@ -748,9 +809,47 @@ internal sealed partial class MainForm
             {
                 _projectCombo.Items.Add(project);
             }
+            _projectCombo.Items.Add(_newProjectChoice);
         }
         _projectCombo.EndUpdate();
         SelectComboItem<CustomerProject>(_projectCombo, projectId, project => project.Id);
+    }
+
+    private void SelectProjectFromCombo()
+    {
+        if (_projectCombo.SelectedItem is NewProjectChoice)
+        {
+            ShowNewProjectDatePicker();
+            return;
+        }
+
+        SelectProject(_projectCombo.SelectedItem as CustomerProject);
+    }
+
+    private void ShowNewProjectDatePicker()
+    {
+        Customer? customer = SelectedCustomer;
+        if (customer is null)
+        {
+            MessageBox.Show(this, "Select a customer first.", "New Project", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using var manager = new CustomerProjectForm(_customers, _projects, customer, null, chooseNewProjectDate: true);
+        DialogResult result = manager.ShowDialog(this);
+        if (manager.StateChanged)
+        {
+            PersistWorkflowState();
+        }
+
+        if (result == DialogResult.OK && manager.SelectedCustomer is not null && manager.SelectedProject is not null)
+        {
+            RefreshCustomerProjectSelectors(manager.SelectedCustomer.Id, manager.SelectedProject.Id);
+        }
+        else
+        {
+            RefreshCustomerProjectSelectors(customer.Id, null);
+        }
     }
 
     private static void SelectComboItem<T>(ComboBox combo, Guid? id, Func<T, Guid> getId)
@@ -886,4 +985,26 @@ internal sealed partial class MainForm
         _notesText.Enabled = enabled;
         _discardCaptureButton.Enabled = enabled;
     }
+
+    private sealed class NewProjectChoice
+    {
+        public override string ToString() => "New Project...";
+    }
+}
+
+internal static class CaptureHistoryDisplaySort
+{
+    public static IEnumerable<CaptureHistoryItem> ByText(
+        IEnumerable<CaptureHistoryItem> items,
+        Func<CaptureHistoryItem, string> selector,
+        bool descending) =>
+        descending
+            ? items.OrderByDescending(selector, StringComparer.OrdinalIgnoreCase)
+            : items.OrderBy(selector, StringComparer.OrdinalIgnoreCase);
+
+    public static IEnumerable<CaptureHistoryItem> ByKey<TKey>(
+        IEnumerable<CaptureHistoryItem> items,
+        Func<CaptureHistoryItem, TKey> selector,
+        bool descending) =>
+        descending ? items.OrderByDescending(selector) : items.OrderBy(selector);
 }

@@ -12,6 +12,7 @@ internal sealed class ReviewTrimForm : Form
     private readonly Func<bool> _isCaptureActive;
     private readonly Action _persist;
     private readonly ReviewTrimService _trimService = new();
+    private readonly SplitContainer _reviewSplit = new();
     private readonly ListView _videos = new();
     private readonly ComboBox _filter = new();
     private readonly WindowsMediaPlayerHost _player = new();
@@ -19,30 +20,43 @@ internal sealed class ReviewTrimForm : Form
     private readonly Panel _wmpSurface = new();
     private readonly Panel _scrubSurface = new();
     private readonly TrackBar _timeline = new();
-    private readonly TrackBar _volume = new();
     private readonly Label _title = new();
     private readonly Label _status = new();
     private readonly Label _position = new();
     private readonly Label _trimStart = new();
     private readonly Label _trimEnd = new();
     private readonly Button _play = new();
-    private readonly Button _pause = new();
-    private readonly Button _mute = new();
-    private readonly Button _fastTrim = new();
-    private readonly Button _frameTrim = new();
+    private readonly Button _backTen = new();
+    private readonly Button _backOne = new();
+    private readonly Button _backFine = new();
+    private readonly Button _forwardFine = new();
+    private readonly Button _forwardOne = new();
+    private readonly Button _forwardTen = new();
+    private readonly Button _setStart = new();
+    private readonly Button _setEnd = new();
+    private readonly Button _saveTrim = new();
+    private readonly ComboBox _trimMethod = new();
     private readonly Button _noTrim = new();
+    private readonly Button _skip = new();
     private readonly System.Windows.Forms.Timer _playbackTimer = new();
     private CaptureHistoryItem? _selected;
     private TimeSpan _duration;
     private TimeSpan _start;
     private TimeSpan _end;
-    private TimeSpan? _cutPreviewStop;
     private bool _scrubbing;
     private TimeSpan _selectedTimelinePosition;
-    private bool _hasSelectedTimelinePosition;
+    private bool _isPlaying;
+    private MarkerEditPhase _markerPhase = MarkerEditPhase.FindingStart;
     private long _lastScrubFrameRequestTicks;
     private CancellationTokenSource? _scrubFrameCancellation;
-    private int _scrubFrameRequestVersion;
+    private ScrubFrameRequest? _pendingScrubFrameRequest;
+    private long _scrubFrameRequestVersion;
+    private long _lastDisplayedScrubFrameVersion;
+    private bool _scrubFrameWorkerRunning;
+    private readonly HashSet<Guid> _skippedThisPass = [];
+    private int _videoSortColumn = -1;
+    private bool _videoSortDescending;
+    private bool _initialReviewSplitterApplied;
     private bool _busy;
 
     public ReviewTrimForm(
@@ -65,6 +79,7 @@ internal sealed class ReviewTrimForm : Form
         Font = new Font("Segoe UI", 9F);
 
         BuildInterface();
+        Shown += (_, _) => SetInitialReviewSplitterDistance();
         _playbackTimer.Interval = 200;
         _playbackTimer.Tick += (_, _) => UpdatePlaybackUi();
         _playbackTimer.Start();
@@ -89,19 +104,38 @@ internal sealed class ReviewTrimForm : Form
 
     private void BuildInterface()
     {
-        var root = new SplitContainer
+        _reviewSplit.Dock = DockStyle.Fill;
+        _reviewSplit.SplitterWidth = 6;
+        _reviewSplit.BackColor = Color.FromArgb(20, 21, 23);
+        _reviewSplit.FixedPanel = FixedPanel.Panel1;
+        _reviewSplit.Panel1MinSize = 0;
+        _reviewSplit.Panel2MinSize = 0;
+        _reviewSplit.Panel1.Padding = new Padding(10);
+        _reviewSplit.Panel2.Padding = new Padding(10);
+        _reviewSplit.Panel1.Controls.Add(BuildReviewList());
+        _reviewSplit.Panel2.Controls.Add(BuildEditor());
+        Controls.Add(_reviewSplit);
+    }
+
+    private void SetInitialReviewSplitterDistance()
+    {
+        if (_initialReviewSplitterApplied)
         {
-            Dock = DockStyle.Fill,
-            SplitterDistance = 365,
-            SplitterWidth = 6,
-            BackColor = Color.FromArgb(20, 21, 23),
-            FixedPanel = FixedPanel.Panel1
-        };
-        root.Panel1.Padding = new Padding(10);
-        root.Panel2.Padding = new Padding(10);
-        root.Panel1.Controls.Add(BuildReviewList());
-        root.Panel2.Controls.Add(BuildEditor());
-        Controls.Add(root);
+            return;
+        }
+
+        const int desiredReviewQueueWidth = 395;
+        const int preferredPanel1Minimum = 240;
+        const int preferredPanel2Minimum = 320;
+        int available = Math.Max(0, _reviewSplit.ClientSize.Width - _reviewSplit.SplitterWidth);
+        int panel1Minimum = Math.Min(preferredPanel1Minimum, available);
+        int panel2Minimum = Math.Min(preferredPanel2Minimum, Math.Max(0, available - panel1Minimum));
+        int maximum = available - panel2Minimum;
+
+        _reviewSplit.Panel1MinSize = panel1Minimum;
+        _reviewSplit.Panel2MinSize = panel2Minimum;
+        _reviewSplit.SplitterDistance = Math.Clamp(desiredReviewQueueWidth, panel1Minimum, maximum);
+        _initialReviewSplitterApplied = true;
     }
 
     private Control BuildReviewList()
@@ -132,9 +166,11 @@ internal sealed class ReviewTrimForm : Form
         header.Controls.Add(_filter, 0, 1);
 
         ConfigureList(_videos);
-        _videos.Columns.Add("Status", 104);
-        _videos.Columns.Add("Customer", 105);
-        _videos.Columns.Add("Tape", 125);
+        _videos.Columns.Add("Status", 86);
+        _videos.Columns.Add("Customer", 88);
+        _videos.Columns.Add("Project", 94);
+        _videos.Columns.Add("Tape", 92);
+        _videos.ColumnClick += (_, eventArgs) => ChangeVideoSort(eventArgs.Column);
         _videos.SelectedIndexChanged += (_, _) => OpenSelectedVideo();
         _videos.DoubleClick += (_, _) => OpenSelectedVideo();
 
@@ -151,12 +187,11 @@ internal sealed class ReviewTrimForm : Form
 
     private Control BuildEditor()
     {
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6 };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 120));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 98));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
 
         _title.Dock = DockStyle.Fill;
@@ -179,22 +214,27 @@ internal sealed class ReviewTrimForm : Form
         playerSurface.Controls.Add(_scrubSurface);
         _scrubSurface.Visible = false;
 
-        var playback = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 7, RowCount = 2 };
-        playback.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
-        playback.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 58));
-        playback.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        playback.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 132));
-        playback.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 55));
-        playback.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 135));
-        playback.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 8));
-        playback.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
-        playback.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        var playback = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(0, 4, 0, 2) };
+        playback.RowStyles.Add(new RowStyle(SizeType.Absolute, 35));
+        playback.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
+        playback.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         ConfigureButton(_play, "Play");
-        ConfigureButton(_pause, "Pause");
-        ConfigureButton(_mute, "Mute");
+        ConfigureButton(_backTen, "-10s");
+        ConfigureButton(_backOne, "-1s");
+        ConfigureButton(_backFine, "◀");
+        ConfigureButton(_forwardFine, "▶");
+        ConfigureButton(_forwardOne, "+1s");
+        ConfigureButton(_forwardTen, "+10s");
+        _play.Width = 76;
+        _backFine.Width = 30;
+        _forwardFine.Width = 30;
         _play.Click += (_, _) => ResumePlayback();
-        _pause.Click += (_, _) => _player.Pause();
-        _mute.Click += (_, _) => { _player.Muted = !_player.Muted; _mute.Text = _player.Muted ? "Unmute" : "Mute"; };
+        _backTen.Click += (_, _) => NavigatePlayhead(-10);
+        _backOne.Click += (_, _) => NavigatePlayhead(-1);
+        _backFine.Click += (_, _) => NavigatePlayhead(-0.1, latestPreviewOnly: true);
+        _forwardFine.Click += (_, _) => NavigatePlayhead(0.1, latestPreviewOnly: true);
+        _forwardOne.Click += (_, _) => NavigatePlayhead(1);
+        _forwardTen.Click += (_, _) => NavigatePlayhead(10);
         _position.Dock = DockStyle.Fill;
         _position.ForeColor = Color.WhiteSmoke;
         _position.TextAlign = ContentAlignment.MiddleCenter;
@@ -202,77 +242,74 @@ internal sealed class ReviewTrimForm : Form
         _timeline.Minimum = 0;
         _timeline.Maximum = 10_000;
         _timeline.TickStyle = TickStyle.None;
-        _timeline.MouseDown += (_, _) =>
+        _timeline.MouseDown += (_, eventArgs) =>
         {
             _scrubbing = true;
             _lastScrubFrameRequestTicks = 0;
+            ShowScrubSurface();
+            SetTimelinePositionFromMouse(eventArgs.X);
             RequestScrubFrame(force: true);
         };
         _timeline.Scroll += (_, _) => RequestScrubFrame(force: false);
         _timeline.MouseUp += (_, _) =>
         {
-            RequestScrubFrame(force: true);
+            RequestScrubFrame(force: true, accurate: true);
             Seek(_selectedTimelinePosition);
             _scrubbing = false;
         };
-        _volume.Dock = DockStyle.Fill;
-        _volume.Minimum = 0;
-        _volume.Maximum = 100;
-        _volume.Value = 80;
-        _volume.TickStyle = TickStyle.None;
-        _volume.ValueChanged += (_, _) => _player.Volume = _volume.Value;
-        playback.Controls.Add(_play, 0, 0);
-        playback.Controls.Add(_pause, 1, 0);
-        playback.Controls.Add(_timeline, 2, 0);
-        playback.Controls.Add(_position, 3, 0);
-        playback.Controls.Add(_mute, 4, 0);
-        playback.Controls.Add(_volume, 5, 0);
+        var navigation = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Padding = new Padding(0, 2, 0, 0) };
+        navigation.Controls.Add(_backTen);
+        navigation.Controls.Add(_backOne);
+        navigation.Controls.Add(_backFine);
+        navigation.Controls.Add(_play);
+        navigation.Controls.Add(_forwardFine);
+        navigation.Controls.Add(_forwardOne);
+        navigation.Controls.Add(_forwardTen);
+        playback.Controls.Add(_timeline, 0, 0);
+        playback.Controls.Add(_position, 0, 1);
+        playback.Controls.Add(navigation, 0, 2);
 
-        var trimPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(0, 6, 0, 4) };
+        var trimPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 4, 0, 4) };
         trimPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         trimPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        trimPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        trimPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        trimPanel.Controls.Add(BuildTrimGroup("TRIM START", _trimStart, true), 0, 0);
-        trimPanel.Controls.Add(BuildTrimGroup("TRIM END", _trimEnd, false), 1, 0);
-        trimPanel.SetRowSpan(trimPanel.GetControlFromPosition(0, 0)!, 2);
-        trimPanel.SetRowSpan(trimPanel.GetControlFromPosition(1, 0)!, 2);
-
-        var cuts = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 8, 0, 4) };
-        cuts.Controls.Add(CreateButton("Preview Start Cut", (_, _) => PreviewCut(_start)));
-        cuts.Controls.Add(CreateButton("Preview End Cut", (_, _) => PreviewCut(_end)));
-        cuts.Controls.Add(CreateButton("Jump to Start", (_, _) => ShowSelectedFrame(_start)));
-        cuts.Controls.Add(CreateButton("Jump to End", (_, _) => ShowSelectedFrame(_end)));
+        trimPanel.Controls.Add(BuildTrimMarkerGroup("START", _trimStart, _setStart, true), 0, 0);
+        trimPanel.Controls.Add(BuildTrimMarkerGroup("END", _trimEnd, _setEnd, false), 1, 0);
 
         var operations = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 8, 0, 4) };
-        _fastTrim.Text = "Fast / Lossless Trim";
-        _frameTrim.Text = "Frame-Accurate Trim";
+        _trimMethod.Items.AddRange(["Fast / Lossless", "Frame-Accurate"]);
+        _trimMethod.SelectedIndex = 0;
+        _trimMethod.DropDownStyle = ComboBoxStyle.DropDownList;
+        _trimMethod.BackColor = Color.FromArgb(45, 47, 50);
+        _trimMethod.ForeColor = Color.White;
+        _trimMethod.Width = 142;
+        _saveTrim.Text = "Save Trim";
         _noTrim.Text = "No Trim Needed";
-        ConfigureButton(_fastTrim, _fastTrim.Text);
-        ConfigureButton(_frameTrim, _frameTrim.Text);
+        _skip.Text = "Skip for Now";
+        ConfigureButton(_saveTrim, _saveTrim.Text);
         ConfigureButton(_noTrim, _noTrim.Text);
-        _fastTrim.Click += async (_, _) => await RunFastTrimAsync();
-        _frameTrim.Click += (_, _) => QueueFrameAccurateTrim();
+        ConfigureButton(_skip, _skip.Text);
+        _saveTrim.Click += async (_, _) => await SaveTrimAsync();
         _noTrim.Click += (_, _) => MarkNoTrimNeeded();
-        operations.Controls.Add(_fastTrim);
-        operations.Controls.Add(_frameTrim);
+        _skip.Click += (_, _) => SkipForNow();
+        operations.Controls.Add(_trimMethod);
+        operations.Controls.Add(_saveTrim);
         operations.Controls.Add(_noTrim);
+        operations.Controls.Add(_skip);
 
         layout.Controls.Add(_title, 0, 0);
         layout.Controls.Add(playerSurface, 0, 1);
         layout.Controls.Add(playback, 0, 2);
         layout.Controls.Add(trimPanel, 0, 3);
-        layout.Controls.Add(cuts, 0, 4);
-        layout.Controls.Add(operations, 0, 5);
+        layout.Controls.Add(operations, 0, 4);
         return layout;
     }
 
-    private Control BuildTrimGroup(string caption, Label value, bool isStart)
+    private Control BuildTrimMarkerGroup(string caption, Label value, Button setMarker, bool isStart)
     {
         var group = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(4) };
         group.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
         group.RowStyles.Add(new RowStyle(SizeType.Absolute, 29));
-        group.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
+        group.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         group.BackColor = Color.FromArgb(45, 47, 50);
         group.Controls.Add(new Label { Text = caption, Dock = DockStyle.Fill, ForeColor = Color.Silver, TextAlign = ContentAlignment.MiddleCenter }, 0, 0);
         value.Dock = DockStyle.Fill;
@@ -280,14 +317,10 @@ internal sealed class ReviewTrimForm : Form
         value.Font = new Font("Consolas", 12F, FontStyle.Bold);
         value.TextAlign = ContentAlignment.MiddleCenter;
         group.Controls.Add(value, 0, 1);
-        var controls = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-        controls.Controls.Add(CreateButton("Set Current", (_, _) => SetTrimAtCurrent(isStart)));
-        foreach (double seconds in new[] { -30d, -5d, -1d, 1d, 5d, 30d })
-        {
-            string text = seconds > 0 ? $"+{seconds:0}" : seconds.ToString("0");
-            controls.Controls.Add(CreateButton(text, (_, _) => NudgeTrim(isStart, seconds)));
-        }
-        group.Controls.Add(controls, 0, 2);
+        ConfigureButton(setMarker, isStart ? "Set Start" : "Set End");
+        setMarker.Dock = DockStyle.Fill;
+        setMarker.Click += (_, _) => SetTrimAtCurrent(isStart);
+        group.Controls.Add(setMarker, 0, 2);
         return group;
     }
 
@@ -298,8 +331,9 @@ internal sealed class ReviewTrimForm : Form
         _videos.Items.Clear();
         foreach (CaptureHistoryItem item in FilteredItems())
         {
-            var row = new ListViewItem(StatusText(item.ReviewStatus)) { Tag = item };
+            var row = new ListViewItem(StatusText(item)) { Tag = item };
             row.SubItems.Add(item.Customer);
+            row.SubItems.Add(item.ProjectName);
             row.SubItems.Add(item.TapeLabel);
             if (item.ReviewStatus == CaptureReviewStatus.NeedsReview)
             {
@@ -316,15 +350,43 @@ internal sealed class ReviewTrimForm : Form
 
     private IEnumerable<CaptureHistoryItem> FilteredItems()
     {
-        return _historyItems
-            .OrderBy(item => item.ReviewStatus == CaptureReviewStatus.NeedsReview ? 0 : 1)
-            .ThenByDescending(item => item.CapturedAt)
-            .Where(item => _filter.SelectedIndex switch
+        IEnumerable<CaptureHistoryItem> filtered = _historyItems.Where(item => _filter.SelectedIndex switch
             {
-                0 => item.ReviewStatus == CaptureReviewStatus.NeedsReview,
+                0 => IsReviewableNeedsReview(item),
                 1 => item.ReviewStatus != CaptureReviewStatus.NeedsReview,
                 _ => true
             });
+
+        if (_videoSortColumn < 0)
+        {
+            return filtered
+                .OrderBy(item => item.ReviewStatus == CaptureReviewStatus.NeedsReview ? 0 : 1)
+                .ThenByDescending(item => item.CapturedAt);
+        }
+
+        return _videoSortColumn switch
+        {
+            0 => CaptureHistoryDisplaySort.ByText(filtered, StatusText, _videoSortDescending),
+            1 => CaptureHistoryDisplaySort.ByText(filtered, item => item.Customer, _videoSortDescending),
+            2 => CaptureHistoryDisplaySort.ByText(filtered, item => item.ProjectName, _videoSortDescending),
+            3 => CaptureHistoryDisplaySort.ByText(filtered, item => item.TapeLabel, _videoSortDescending),
+            _ => filtered
+        };
+    }
+
+    private void ChangeVideoSort(int column)
+    {
+        if (_videoSortColumn == column)
+        {
+            _videoSortDescending = !_videoSortDescending;
+        }
+        else
+        {
+            _videoSortColumn = column;
+            _videoSortDescending = false;
+        }
+
+        RefreshVideoList();
     }
 
     private void OpenSelectedVideo()
@@ -336,7 +398,7 @@ internal sealed class ReviewTrimForm : Form
 
         if (!File.Exists(item.OutputPath))
         {
-            _status.Text = "The selected completed recording is unavailable.";
+            _status.Text = "The selected recording file is missing. It remains in Capture History.";
             return;
         }
 
@@ -344,11 +406,16 @@ internal sealed class ReviewTrimForm : Form
         _duration = TimeSpan.Zero;
         _start = TimeSpan.Zero;
         _end = TimeSpan.Zero;
-        _cutPreviewStop = null;
-        _hasSelectedTimelinePosition = false;
+        _selectedTimelinePosition = TimeSpan.Zero;
+        _isPlaying = false;
+        _markerPhase = MarkerEditPhase.FindingStart;
+        UpdatePlayButton();
         CancelScrubFrameRequest();
         ClearScrubFrame();
         ShowWmpSurface();
+        _player.Stop();
+        _timeline.Value = _timeline.Minimum;
+        _position.Text = $"{FormatTime(TimeSpan.Zero)} / {FormatTime(TimeSpan.Zero)}";
         _player.Open(item.OutputPath);
         UpdateSelectedLabels();
         _status.Text = _isCaptureActive()
@@ -371,62 +438,47 @@ internal sealed class ReviewTrimForm : Form
             UpdateSelectedLabels();
         }
 
-        TimeSpan current = TimeSpan.FromSeconds(Math.Max(0, _player.Position));
-        if (!_scrubbing && _duration > TimeSpan.Zero)
+        if (_duration == TimeSpan.Zero)
         {
+            _timeline.Value = _timeline.Minimum;
+            _position.Text = $"{FormatTime(TimeSpan.Zero)} / {FormatTime(TimeSpan.Zero)}";
+            return;
+        }
+
+        TimeSpan current = TimeSpan.FromSeconds(Math.Max(0, _player.Position));
+        if (_isPlaying && !_scrubbing && _duration > TimeSpan.Zero)
+        {
+            _selectedTimelinePosition = ClampToDuration(current);
             _timeline.Value = Math.Clamp((int)Math.Round(current.TotalSeconds / _duration.TotalSeconds * _timeline.Maximum), _timeline.Minimum, _timeline.Maximum);
         }
-        if (_scrubbing)
+        if (_scrubbing || !_isPlaying)
         {
-            TimeSpan selected = TimelinePosition();
-            _position.Text = $"{FormatTime(selected)} / {FormatTime(_duration)}";
+            _position.Text = $"{FormatTime(_selectedTimelinePosition)} / {FormatTime(_duration)}";
         }
         else
         {
             _position.Text = $"{FormatTime(current)} / {FormatTime(_duration)}";
         }
-
-        if (_cutPreviewStop.HasValue && current >= _cutPreviewStop.Value)
-        {
-            _player.Pause();
-            _cutPreviewStop = null;
-        }
+        UpdateSelectedLabels();
     }
 
     private void SetTrimAtCurrent(bool isStart)
     {
-        TimeSpan current = _hasSelectedTimelinePosition
-            ? _selectedTimelinePosition
-            : TimeSpan.FromSeconds(Math.Max(0, _player.Position));
         if (isStart)
         {
-            _start = ClampStart(current);
+            _start = ClampToDuration(_selectedTimelinePosition);
+            _markerPhase = MarkerEditPhase.FindingEnd;
         }
         else
         {
-            _end = ClampEnd(current);
+            _end = ClampToDuration(_selectedTimelinePosition);
+            _markerPhase = MarkerEditPhase.MarkersSet;
         }
         UpdateSelectedLabels();
     }
 
-    private void NudgeTrim(bool isStart, double seconds)
-    {
-        if (isStart)
-        {
-            _start = ClampStart(_start + TimeSpan.FromSeconds(seconds));
-        }
-        else
-        {
-            _end = ClampEnd(_end + TimeSpan.FromSeconds(seconds));
-        }
-        UpdateSelectedLabels();
-    }
-
-    private TimeSpan ClampStart(TimeSpan value) =>
-        _duration <= TimeSpan.Zero ? TimeSpan.Zero : TimeSpan.FromTicks(Math.Clamp(value.Ticks, 0, Math.Max(0, _end.Ticks - TimeSpan.TicksPerMillisecond)));
-
-    private TimeSpan ClampEnd(TimeSpan value) =>
-        _duration <= TimeSpan.Zero ? TimeSpan.Zero : TimeSpan.FromTicks(Math.Clamp(value.Ticks, Math.Min(_duration.Ticks, _start.Ticks + TimeSpan.TicksPerMillisecond), _duration.Ticks));
+    private TimeSpan ClampToDuration(TimeSpan value) =>
+        _duration <= TimeSpan.Zero ? TimeSpan.Zero : TimeSpan.FromTicks(Math.Clamp(value.Ticks, 0, _duration.Ticks));
 
     private TimeSpan TimelinePosition()
     {
@@ -435,7 +487,25 @@ internal sealed class ReviewTrimForm : Form
             : TimeSpan.FromSeconds(_duration.TotalSeconds * _timeline.Value / _timeline.Maximum);
     }
 
-    private void RequestScrubFrame(bool force)
+    private void SetTimelinePositionFromMouse(int x)
+    {
+        if (_duration <= TimeSpan.Zero || _timeline.ClientSize.Width <= 1)
+        {
+            return;
+        }
+
+        double fraction = Math.Clamp(x / (double)(_timeline.ClientSize.Width - 1), 0, 1);
+        _timeline.Value = Math.Clamp(
+            (int)Math.Round(_timeline.Minimum + fraction * (_timeline.Maximum - _timeline.Minimum)),
+            _timeline.Minimum,
+            _timeline.Maximum);
+        _selectedTimelinePosition = TimelinePosition();
+        _position.Text = $"{FormatTime(_selectedTimelinePosition)} / {FormatTime(_duration)}";
+        Seek(_selectedTimelinePosition);
+        UpdateSelectedLabels();
+    }
+
+    private void RequestScrubFrame(bool force, bool accurate = false)
     {
         if (!_scrubbing || _duration <= TimeSpan.Zero)
         {
@@ -444,8 +514,8 @@ internal sealed class ReviewTrimForm : Form
 
         TimeSpan target = TimelinePosition();
         _selectedTimelinePosition = target;
-        _hasSelectedTimelinePosition = true;
         _position.Text = $"{FormatTime(target)} / {FormatTime(_duration)}";
+        UpdateSelectedLabels();
 
         const long minimumRequestIntervalMilliseconds = 180;
         long now = Environment.TickCount64;
@@ -455,7 +525,7 @@ internal sealed class ReviewTrimForm : Form
         }
 
         _lastScrubFrameRequestTicks = now;
-        _ = ExtractScrubFrameAsync(target);
+        QueueScrubFrame(target, accurate);
     }
 
     private void Seek(TimeSpan position)
@@ -465,50 +535,135 @@ internal sealed class ReviewTrimForm : Form
 
     private void ResumePlayback()
     {
-        if (_hasSelectedTimelinePosition)
+        if (_isPlaying)
         {
-            Seek(_selectedTimelinePosition);
+            PausePlayback();
+            return;
         }
 
         CancelScrubFrameRequest();
         ClearScrubFrame();
-        _hasSelectedTimelinePosition = false;
         ShowWmpSurface();
+        Seek(_selectedTimelinePosition);
         _player.Play();
+        _isPlaying = true;
+        UpdatePlayButton();
     }
 
-    private void ShowSelectedFrame(TimeSpan position)
+    private void PausePlayback()
+    {
+        _player.Pause();
+        _isPlaying = false;
+        UpdatePlayButton();
+        if (_duration > TimeSpan.Zero)
+        {
+            _selectedTimelinePosition = ClampToDuration(TimeSpan.FromSeconds(Math.Max(0, _player.Position)));
+            _timeline.Value = Math.Clamp(
+                (int)Math.Round(_selectedTimelinePosition.TotalSeconds / _duration.TotalSeconds * _timeline.Maximum),
+                _timeline.Minimum,
+                _timeline.Maximum);
+            _position.Text = $"{FormatTime(_selectedTimelinePosition)} / {FormatTime(_duration)}";
+            UpdateSelectedLabels();
+        }
+    }
+
+    private void NavigatePlayhead(double seconds, bool latestPreviewOnly = false)
     {
         if (_duration <= TimeSpan.Zero)
         {
             return;
         }
 
-        TimeSpan target = TimeSpan.FromTicks(Math.Clamp(position.Ticks, 0, _duration.Ticks));
-        _selectedTimelinePosition = target;
-        _hasSelectedTimelinePosition = true;
-        _position.Text = $"{FormatTime(target)} / {FormatTime(_duration)}";
+        _player.Pause();
+        _isPlaying = false;
+        UpdatePlayButton();
+        _selectedTimelinePosition = ClampToDuration(_selectedTimelinePosition + TimeSpan.FromSeconds(seconds));
         _timeline.Value = Math.Clamp(
-            (int)Math.Round(target.TotalSeconds / _duration.TotalSeconds * _timeline.Maximum),
+            (int)Math.Round(_selectedTimelinePosition.TotalSeconds / _duration.TotalSeconds * _timeline.Maximum),
             _timeline.Minimum,
             _timeline.Maximum);
-        Seek(target);
-        _ = ExtractScrubFrameAsync(target);
+        _position.Text = $"{FormatTime(_selectedTimelinePosition)} / {FormatTime(_duration)}";
+        UpdateSelectedLabels();
+        ShowScrubSurface();
+        QueueScrubFrame(_selectedTimelinePosition, accurate: true, latestPreviewOnly);
     }
 
-    private async Task ExtractScrubFrameAsync(TimeSpan target)
+    private void QueueScrubFrame(TimeSpan target, bool accurate = false, bool latestPreviewOnly = false)
     {
         if (_selected is null || !File.Exists(_selected.OutputPath))
         {
             return;
         }
 
-        CancelScrubFrameRequest();
-        var cancellation = new CancellationTokenSource();
-        _scrubFrameCancellation = cancellation;
-        int requestVersion = Interlocked.Increment(ref _scrubFrameRequestVersion);
-        string path = _selected.OutputPath;
+        _pendingScrubFrameRequest = new ScrubFrameRequest(target, accurate, latestPreviewOnly);
+        Interlocked.Increment(ref _scrubFrameRequestVersion);
+        _scrubFrameCancellation ??= new CancellationTokenSource();
+        StartScrubFrameWorker();
+    }
 
+    private void StartScrubFrameWorker()
+    {
+        if (_scrubFrameWorkerRunning || IsDisposed)
+        {
+            return;
+        }
+
+        _scrubFrameWorkerRunning = true;
+        _ = ProcessScrubFrameRequestsAsync(_scrubFrameCancellation!);
+    }
+
+    private async Task ProcessScrubFrameRequestsAsync(CancellationTokenSource cancellation)
+    {
+        try
+        {
+            while (!cancellation.IsCancellationRequested && _pendingScrubFrameRequest.HasValue)
+            {
+                ScrubFrameRequest request = _pendingScrubFrameRequest.Value;
+                _pendingScrubFrameRequest = null;
+                long requestVersion = Volatile.Read(ref _scrubFrameRequestVersion);
+                string? path = _selected?.OutputPath;
+                if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                {
+                    continue;
+                }
+
+                Bitmap? frame = await ExtractScrubFrameAsync(path, request.Target, request.Accurate, cancellation.Token);
+                if (frame is null)
+                {
+                    continue;
+                }
+
+                if (IsDisposed || cancellation.IsCancellationRequested ||
+                    (request.LatestPreviewOnly && requestVersion != Volatile.Read(ref _scrubFrameRequestVersion)) ||
+                    requestVersion < _lastDisplayedScrubFrameVersion ||
+                    !string.Equals(path, _selected?.OutputPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    frame.Dispose();
+                    continue;
+                }
+
+                ShowScrubFrame(frame, requestVersion);
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_scrubFrameCancellation, cancellation))
+            {
+                _scrubFrameCancellation = null;
+            }
+
+            cancellation.Dispose();
+            _scrubFrameWorkerRunning = false;
+            if (!IsDisposed && _pendingScrubFrameRequest.HasValue)
+            {
+                _scrubFrameCancellation ??= new CancellationTokenSource();
+                StartScrubFrameWorker();
+            }
+        }
+    }
+
+    private async Task<Bitmap?> ExtractScrubFrameAsync(string path, TimeSpan target, bool accurate, CancellationToken cancellationToken)
+    {
         try
         {
             var startInfo = new ProcessStartInfo
@@ -522,21 +677,34 @@ internal sealed class ReviewTrimForm : Form
             startInfo.ArgumentList.Add("-hide_banner");
             startInfo.ArgumentList.Add("-loglevel");
             startInfo.ArgumentList.Add("error");
+            startInfo.ArgumentList.Add("-probesize");
+            startInfo.ArgumentList.Add("32k");
+            startInfo.ArgumentList.Add("-analyzeduration");
+            startInfo.ArgumentList.Add("0");
+            if (!accurate)
+            {
+                startInfo.ArgumentList.Add("-noaccurate_seek");
+            }
             startInfo.ArgumentList.Add("-ss");
             startInfo.ArgumentList.Add(target.TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
             startInfo.ArgumentList.Add("-i");
             startInfo.ArgumentList.Add(path);
+            startInfo.ArgumentList.Add("-an");
+            startInfo.ArgumentList.Add("-sn");
+            startInfo.ArgumentList.Add("-dn");
+            startInfo.ArgumentList.Add("-vf");
+            startInfo.ArgumentList.Add("scale=480:-2:flags=fast_bilinear");
             startInfo.ArgumentList.Add("-frames:v");
             startInfo.ArgumentList.Add("1");
             startInfo.ArgumentList.Add("-f");
             startInfo.ArgumentList.Add("image2pipe");
             startInfo.ArgumentList.Add("-vcodec");
-            startInfo.ArgumentList.Add("mjpeg");
+            startInfo.ArgumentList.Add("bmp");
             startInfo.ArgumentList.Add("pipe:1");
 
             using var process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException("FFmpeg could not start scrub-frame extraction.");
-            using var registration = cancellation.Token.Register(() =>
+            using var registration = cancellationToken.Register(() =>
             {
                 try
                 {
@@ -550,57 +718,44 @@ internal sealed class ReviewTrimForm : Form
                 }
             });
             using var imageBytes = new MemoryStream();
-            Task copy = process.StandardOutput.BaseStream.CopyToAsync(imageBytes, cancellation.Token);
-            Task<string> errors = process.StandardError.ReadToEndAsync(cancellation.Token);
-            await Task.WhenAll(copy, errors, process.WaitForExitAsync(cancellation.Token));
+            Task copy = process.StandardOutput.BaseStream.CopyToAsync(imageBytes, cancellationToken);
+            Task<string> errors = process.StandardError.ReadToEndAsync(cancellationToken);
+            await Task.WhenAll(copy, errors, process.WaitForExitAsync(cancellationToken));
             if (process.ExitCode != 0 || imageBytes.Length == 0)
             {
-                return;
+                return null;
             }
 
             imageBytes.Position = 0;
             using var extracted = Image.FromStream(imageBytes);
-            var frame = new Bitmap(extracted);
-            if (IsDisposed || cancellation.IsCancellationRequested ||
-                requestVersion != Volatile.Read(ref _scrubFrameRequestVersion) ||
-                !string.Equals(path, _selected?.OutputPath, StringComparison.OrdinalIgnoreCase))
-            {
-                frame.Dispose();
-                return;
-            }
-
-            BeginInvoke(() => ShowScrubFrame(frame, requestVersion));
+            return new Bitmap(extracted);
         }
         catch (OperationCanceledException)
         {
+            return null;
         }
         catch
         {
             // Retain the previous frame rather than replacing it with an error image.
-        }
-        finally
-        {
-            if (ReferenceEquals(_scrubFrameCancellation, cancellation))
-            {
-                _scrubFrameCancellation = null;
-            }
-            cancellation.Dispose();
+            return null;
         }
     }
 
-    private void ShowScrubFrame(Bitmap frame, int requestVersion)
+    private void ShowScrubFrame(Bitmap frame, long requestVersion)
     {
-        if (IsDisposed || requestVersion != Volatile.Read(ref _scrubFrameRequestVersion))
+        if (IsDisposed || requestVersion < _lastDisplayedScrubFrameVersion)
         {
             frame.Dispose();
             return;
         }
 
+        _lastDisplayedScrubFrameVersion = requestVersion;
         var old = _scrubFrame.Image;
         _scrubFrame.Image = frame;
         _wmpSurface.Visible = false;
         _scrubSurface.Visible = true;
         _scrubSurface.BringToFront();
+        _scrubSurface.Invalidate();
         old?.Dispose();
     }
 
@@ -618,24 +773,32 @@ internal sealed class ReviewTrimForm : Form
         _wmpSurface.BringToFront();
     }
 
+    private void ShowScrubSurface()
+    {
+        _wmpSurface.Visible = false;
+        _scrubSurface.Visible = true;
+        _scrubSurface.BringToFront();
+        _scrubSurface.Invalidate();
+    }
+
     private void CancelScrubFrameRequest()
     {
         Interlocked.Increment(ref _scrubFrameRequestVersion);
-        _scrubFrameCancellation?.Cancel();
+        _pendingScrubFrameRequest = null;
+        CancellationTokenSource? cancellation = _scrubFrameCancellation;
         _scrubFrameCancellation = null;
+        cancellation?.Cancel();
     }
 
-    private void PreviewCut(TimeSpan cut)
+    private async Task SaveTrimAsync()
     {
-        if (_duration <= TimeSpan.Zero)
+        if (_trimMethod.SelectedIndex == 1)
         {
+            QueueFrameAccurateTrim();
             return;
         }
 
-        TimeSpan start = TimeSpan.FromSeconds(Math.Max(0, cut.TotalSeconds - 5));
-        _cutPreviewStop = TimeSpan.FromSeconds(Math.Min(_duration.TotalSeconds, cut.TotalSeconds + 5));
-        Seek(start);
-        _player.Play();
+        await RunFastTrimAsync();
     }
 
     private async Task RunFastTrimAsync()
@@ -651,8 +814,7 @@ internal sealed class ReviewTrimForm : Form
             var request = CreateTrimRequest(TrimMethod.FastLossless);
             TrimResult result = await _trimService.TrimAsync(_ffmpegPath, request, CancellationToken.None);
             ApplyTrimCompletion(request, result);
-            ReloadTrimmedVideo(result.FinalDurationSeconds);
-            _status.Text = "Trim complete - original preserved in Originals.";
+            AdvanceAfterSuccessfulCompletion(request.HistoryItem);
         }
         catch (Exception ex)
         {
@@ -703,14 +865,50 @@ internal sealed class ReviewTrimForm : Form
         _selected.ReviewedAt = DateTime.Now;
         _selected.TrimMethod = null;
         _persist();
-        _status.Text = "Marked complete - no trim needed.";
-        RefreshVideoList();
+        AdvanceAfterSuccessfulCompletion(_selected);
+    }
+
+    private void SkipForNow()
+    {
+        if (_selected is null || _busy || _selected.ReviewStatus != CaptureReviewStatus.NeedsReview)
+        {
+            return;
+        }
+
+        _skippedThisPass.Add(_selected.Id);
+        List<CaptureHistoryItem> outstanding = OrderedNeedsReview();
+        int currentIndex = outstanding.FindIndex(item => item.Id == _selected.Id);
+        CaptureHistoryItem? next = outstanding
+            .Skip(currentIndex + 1)
+            .FirstOrDefault(item => !_skippedThisPass.Contains(item.Id));
+        next ??= outstanding
+            .Take(Math.Max(0, currentIndex))
+            .FirstOrDefault(item => !_skippedThisPass.Contains(item.Id));
+
+        if (next is null)
+        {
+            _status.Text = "All remaining Needs Review recordings have been skipped for now.";
+            return;
+        }
+
+        SelectAndLoad(next);
     }
 
     private bool CanTrim()
     {
-        if (_selected is null || _busy || _duration <= TimeSpan.Zero || _end <= _start)
+        if (_selected is null || _busy || _duration <= TimeSpan.Zero)
         {
+            return false;
+        }
+
+        if (_end <= _start)
+        {
+            MessageBox.Show(
+                this,
+                "Set a Start marker before the End marker before saving the trim.",
+                "Invalid Trim Range",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
             return false;
         }
 
@@ -734,13 +932,11 @@ internal sealed class ReviewTrimForm : Form
         {
             if (_selected?.Id == result.Request.TrimRequest.HistoryItem.Id)
             {
-                ReloadTrimmedVideo(result.Result.FinalDurationSeconds);
-                _status.Text = "Trim complete - original preserved in Originals.";
+                AdvanceAfterSuccessfulCompletion(result.Request.TrimRequest.HistoryItem);
             }
-            RefreshVideoList();
-            if (_selected is not null)
+            else
             {
-                UpdateSelectedLabels();
+                RefreshVideoList();
             }
         }
         SetBusy(false, null);
@@ -760,6 +956,77 @@ internal sealed class ReviewTrimForm : Form
         item.FileSizeBytes = File.Exists(item.OutputPath) ? new FileInfo(item.OutputPath).Length : 0;
         _persist();
         RefreshVideoList();
+    }
+
+    private List<CaptureHistoryItem> OrderedNeedsReview() => _historyItems
+        .Where(IsReviewableNeedsReview)
+        .OrderByDescending(item => item.CapturedAt)
+        .ToList();
+
+    private void AdvanceAfterSuccessfulCompletion(CaptureHistoryItem completed)
+    {
+        List<CaptureHistoryItem> ordered = _historyItems
+            .Where(item => IsReviewableNeedsReview(item) || item.Id == completed.Id)
+            .OrderByDescending(item => item.CapturedAt)
+            .ToList();
+        int completedIndex = ordered.FindIndex(item => item.Id == completed.Id);
+        CaptureHistoryItem? next = completedIndex < 0
+            ? null
+            : ordered.Skip(completedIndex + 1)
+                .FirstOrDefault(IsReviewableNeedsReview);
+
+        if (next is null)
+        {
+            RefreshVideoList();
+            ShowNoMoreReviewItems();
+            return;
+        }
+
+        _skippedThisPass.Clear();
+        SelectAndLoad(next);
+    }
+
+    private void SelectAndLoad(CaptureHistoryItem item)
+    {
+        if (_filter.SelectedIndex != 0)
+        {
+            _filter.SelectedIndex = 0;
+        }
+
+        _selected = item;
+        RefreshVideoList();
+        foreach (ListViewItem row in _videos.Items)
+        {
+            if (row.Tag is CaptureHistoryItem candidate && candidate.Id == item.Id)
+            {
+                row.Selected = true;
+                row.Focused = true;
+                row.EnsureVisible();
+                break;
+            }
+        }
+        OpenSelectedVideo();
+    }
+
+    private void ShowNoMoreReviewItems()
+    {
+        _selected = null;
+        _duration = TimeSpan.Zero;
+        _start = TimeSpan.Zero;
+        _end = TimeSpan.Zero;
+        _selectedTimelinePosition = TimeSpan.Zero;
+        _isPlaying = false;
+        _markerPhase = MarkerEditPhase.FindingStart;
+        CancelScrubFrameRequest();
+        ClearScrubFrame();
+        ShowWmpSurface();
+        _player.Stop();
+        _title.Text = "No recordings need review";
+        _trimStart.Text = FormatTime(TimeSpan.Zero);
+        _trimEnd.Text = FormatTime(TimeSpan.Zero);
+        _position.Text = "00:00:00.000 / 00:00:00.000";
+        _timeline.Value = _timeline.Minimum;
+        _status.Text = "Review queue complete.";
     }
 
     private bool ConfirmTrim(TrimMethod method)
@@ -794,7 +1061,8 @@ internal sealed class ReviewTrimForm : Form
         _start = TimeSpan.Zero;
         _end = _duration;
         _selectedTimelinePosition = TimeSpan.Zero;
-        _hasSelectedTimelinePosition = false;
+        _isPlaying = false;
+        _markerPhase = MarkerEditPhase.FindingStart;
         _timeline.Value = _timeline.Minimum;
         _position.Text = $"{FormatTime(TimeSpan.Zero)} / {FormatTime(_duration)}";
         _player.Open(_selected.OutputPath);
@@ -805,9 +1073,11 @@ internal sealed class ReviewTrimForm : Form
     private void SetBusy(bool busy, string? status)
     {
         _busy = busy;
-        _fastTrim.Enabled = !busy;
-        _frameTrim.Enabled = !busy;
+        _saveTrim.Enabled = !busy;
+        _trimMethod.Enabled = !busy;
         _noTrim.Enabled = !busy;
+        _skip.Enabled = !busy;
+        _videos.Enabled = !busy;
         if (status is not null)
         {
             _status.Text = status;
@@ -821,10 +1091,12 @@ internal sealed class ReviewTrimForm : Form
             return;
         }
 
-        _title.Text = $"{_selected.Customer} - {_selected.TapeLabel} ({StatusText(_selected.ReviewStatus)})";
-        _trimStart.Text = FormatTime(_start);
-        _trimEnd.Text = FormatTime(_end);
+        _title.Text = $"{_selected.Customer} - {_selected.TapeLabel} ({StatusText(_selected)})";
+        _trimStart.Text = FormatTime(_markerPhase == MarkerEditPhase.FindingStart ? _selectedTimelinePosition : _start);
+        _trimEnd.Text = FormatTime(_markerPhase == MarkerEditPhase.FindingEnd ? _selectedTimelinePosition : _end);
     }
+
+    private void UpdatePlayButton() => _play.Text = _isPlaying ? "Pause" : "Play";
 
     private static void ConfigureList(ListView list)
     {
@@ -857,13 +1129,33 @@ internal sealed class ReviewTrimForm : Form
         button.Margin = new Padding(3);
     }
 
-    private static string StatusText(CaptureReviewStatus status) => status switch
+    private static bool IsReviewableNeedsReview(CaptureHistoryItem item) =>
+        item.ReviewStatus == CaptureReviewStatus.NeedsReview && File.Exists(item.OutputPath);
+
+    private static string StatusText(CaptureHistoryItem item)
     {
-        CaptureReviewStatus.NeedsReview => "Needs Review",
-        CaptureReviewStatus.CompleteTrimmed => "Complete - Trimmed",
-        _ => "Complete - No Trim"
-    };
+        if (item.ReviewStatus == CaptureReviewStatus.NeedsReview && !File.Exists(item.OutputPath))
+        {
+            return "Missing File";
+        }
+
+        return item.ReviewStatus switch
+        {
+            CaptureReviewStatus.NeedsReview => "Needs Review",
+            CaptureReviewStatus.CompleteTrimmed => "Complete - Trimmed",
+            _ => "Complete - No Trim"
+        };
+    }
 
     private static string FormatTime(TimeSpan value) =>
         $"{(int)value.TotalHours:00}:{value.Minutes:00}:{value.Seconds:00}.{value.Milliseconds:000}";
+
+    private readonly record struct ScrubFrameRequest(TimeSpan Target, bool Accurate, bool LatestPreviewOnly);
+
+    private enum MarkerEditPhase
+    {
+        FindingStart,
+        FindingEnd,
+        MarkersSet
+    }
 }

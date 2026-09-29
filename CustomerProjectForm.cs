@@ -13,6 +13,7 @@ internal sealed class CustomerProjectForm : Form
     private readonly Button _renameProjectButton = new();
     private readonly Button _reopenProjectButton = new();
     private readonly Button _resumeButton = new();
+    private readonly bool _chooseNewProjectDate;
 
     public Customer? SelectedCustomer { get; private set; }
     public CustomerProject? SelectedProject { get; private set; }
@@ -22,10 +23,12 @@ internal sealed class CustomerProjectForm : Form
         List<Customer> customers,
         List<CustomerProject> projects,
         Customer? selectedCustomer,
-        CustomerProject? selectedProject)
+        CustomerProject? selectedProject,
+        bool chooseNewProjectDate = false)
     {
         _customers = customers;
         _projects = projects;
+        _chooseNewProjectDate = chooseNewProjectDate;
 
         Text = "Customers / Projects";
         StartPosition = FormStartPosition.CenterParent;
@@ -40,6 +43,10 @@ internal sealed class CustomerProjectForm : Form
         if (selectedCustomer is not null)
         {
             RefreshProjects(selectedCustomer.Id, selectedProject?.Id);
+        }
+        if (_chooseNewProjectDate && selectedCustomer is not null)
+        {
+            Shown += (_, _) => CreateProjectFromDatePicker(selectedCustomer);
         }
     }
 
@@ -217,7 +224,11 @@ internal sealed class CustomerProjectForm : Form
 
     private CustomerProject? CreateProject(Customer customer)
     {
-        var requestedDate = DateTime.Today;
+        return CreateProject(customer, DateTime.Today);
+    }
+
+    private CustomerProject? CreateProject(Customer customer, DateTime requestedDate)
+    {
         while (true)
         {
             var existing = _projects.FirstOrDefault(project =>
@@ -249,6 +260,29 @@ internal sealed class CustomerProjectForm : Form
                     return null;
             }
         }
+    }
+
+    private void CreateProjectFromDatePicker(Customer customer)
+    {
+        DateTime? selectedDate = PromptForProjectDate(DateTime.Today);
+        if (!selectedDate.HasValue)
+        {
+            Close();
+            return;
+        }
+
+        CustomerProject? project = CreateProject(customer, selectedDate.Value.Date);
+        if (project is null)
+        {
+            Close();
+            return;
+        }
+
+        StateChanged = true;
+        SelectedCustomer = customer;
+        SelectedProject = project;
+        DialogResult = DialogResult.OK;
+        Close();
     }
 
     private static DuplicateDateChoice ShowDuplicateDateDialog(string customerName, DateTime date)
