@@ -6,11 +6,14 @@ internal sealed class CustomerProjectForm : Form
 {
     private readonly List<Customer> _customers;
     private readonly List<CustomerProject> _projects;
+    private readonly List<CaptureHistoryItem> _historyItems;
+    private readonly Action? _projectStateChanged;
     private readonly ListBox _customerList = new();
     private readonly ListBox _projectList = new();
     private readonly Button _newCustomerButton = new();
     private readonly Button _newProjectButton = new();
     private readonly Button _renameProjectButton = new();
+    private readonly Button _completeProjectButton = new();
     private readonly Button _reopenProjectButton = new();
     private readonly Button _resumeButton = new();
     private readonly bool _chooseNewProjectDate;
@@ -22,13 +25,17 @@ internal sealed class CustomerProjectForm : Form
     public CustomerProjectForm(
         List<Customer> customers,
         List<CustomerProject> projects,
+        List<CaptureHistoryItem> historyItems,
         Customer? selectedCustomer,
         CustomerProject? selectedProject,
-        bool chooseNewProjectDate = false)
+        bool chooseNewProjectDate = false,
+        Action? projectStateChanged = null)
     {
         _customers = customers;
         _projects = projects;
+        _historyItems = historyItems;
         _chooseNewProjectDate = chooseNewProjectDate;
+        _projectStateChanged = projectStateChanged;
 
         Text = "Customers / Projects";
         StartPosition = FormStartPosition.CenterParent;
@@ -82,10 +89,12 @@ internal sealed class CustomerProjectForm : Form
         var projectButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
         ConfigureButton(_resumeButton, "Use Project");
         ConfigureButton(_reopenProjectButton, "Reopen Project");
+        ConfigureButton(_completeProjectButton, "Mark Project Complete");
         ConfigureButton(_renameProjectButton, "Rename");
         ConfigureButton(_newProjectButton, "New Project");
         projectButtons.Controls.Add(_resumeButton);
         projectButtons.Controls.Add(_reopenProjectButton);
+        projectButtons.Controls.Add(_completeProjectButton);
         projectButtons.Controls.Add(_renameProjectButton);
         projectButtons.Controls.Add(_newProjectButton);
         root.Controls.Add(projectButtons, 1, 2);
@@ -102,9 +111,20 @@ internal sealed class CustomerProjectForm : Form
         _newCustomerButton.Click += (_, _) => AddCustomer();
         _newProjectButton.Click += (_, _) => AddProject();
         _renameProjectButton.Click += (_, _) => RenameProject();
+        _completeProjectButton.Click += (_, _) => CompleteProject();
         _reopenProjectButton.Click += (_, _) => ReopenProject();
         _resumeButton.Click += (_, _) => ResumeProject();
         _projectList.DoubleClick += (_, _) => ResumeProject();
+        _projectList.SelectedIndexChanged += (_, _) => UpdateProjectActions();
+        _projectList.FormattingEnabled = true;
+        _projectList.Format += (_, eventArgs) =>
+        {
+            if (eventArgs.ListItem is CustomerProject project && project.IsCompleted)
+            {
+                eventArgs.Value = $"{project.DisplayName} - Completed";
+            }
+        };
+        UpdateProjectActions();
     }
 
     private static Label CreateHeader(string text) => new()
@@ -160,6 +180,17 @@ internal sealed class CustomerProjectForm : Form
         }
         _projectList.EndUpdate();
         SelectItem<CustomerProject>(_projectList, selectId, project => project.Id);
+        UpdateProjectActions();
+    }
+
+    private void UpdateProjectActions()
+    {
+        bool isCompleted = _projectList.SelectedItem is CustomerProject { IsCompleted: true };
+        bool isActive = _projectList.SelectedItem is CustomerProject { IsCompleted: false };
+        _completeProjectButton.Visible = isActive;
+        _completeProjectButton.Enabled = isActive;
+        _reopenProjectButton.Visible = isCompleted;
+        _reopenProjectButton.Enabled = isCompleted;
     }
 
     private static void SelectItem<T>(ListBox list, Guid? id, Func<T, Guid> getId)
@@ -368,6 +399,57 @@ internal sealed class CustomerProjectForm : Form
         RefreshProjects(project.CustomerId, project.Id);
     }
 
+    private void CompleteProject()
+    {
+        if (_projectList.SelectedItem is not CustomerProject project || project.IsCompleted)
+        {
+            return;
+        }
+
+        var customer = _customers.FirstOrDefault(item => item.Id == project.CustomerId);
+        var recordings = _historyItems.Where(item => item.ProjectId == project.Id).ToList();
+        int needsReview = recordings.Count(item => item.ReviewStatus == CaptureReviewStatus.NeedsReview);
+        int missingFile = recordings.Count(item =>
+            item.ReviewStatus == CaptureReviewStatus.NeedsReview && !File.Exists(item.OutputPath));
+        int complete = recordings.Count(item => item.ReviewStatus is CaptureReviewStatus.CompleteTrimmed
+            or CaptureReviewStatus.CompleteNoTrimNeeded);
+        int discarded = recordings.Count(item => item.ReviewStatus == CaptureReviewStatus.Discarded);
+
+        var summary =
+            $"Customer: {customer?.FullName ?? "Unknown Customer"}\n" +
+            $"Project: {project.DisplayName}\n\n" +
+            $"Recordings: {recordings.Count}\n" +
+            $"Complete: {complete}\n" +
+            $"Needs Review: {needsReview}\n" +
+            $"Discarded: {discarded}\n" +
+            $"Missing File: {missingFile}";
+
+        var warning = needsReview > 0
+            ? $"\n\nThis project still has {needsReview} recording(s) marked Needs Review." +
+              (missingFile > 0
+                  ? $"\n{missingFile} of those recording(s) has a missing file."
+                  : string.Empty) +
+              "\n\nNeeds Review includes any missing-file recordings shown above. Those records will remain unchanged in Capture History."
+            : string.Empty;
+
+        if (MessageBox.Show(
+                this,
+                summary + warning + "\n\nMark this project complete?",
+                "Mark Project Complete",
+                MessageBoxButtons.YesNo,
+                needsReview > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+        {
+            return;
+        }
+
+        project.IsCompleted = true;
+        project.CompletedAt = DateTime.Now;
+        StateChanged = true;
+        _projectStateChanged?.Invoke();
+        RefreshProjects(project.CustomerId, project.Id);
+    }
+
     private void ReopenProject()
     {
         if (_projectList.SelectedItem is not CustomerProject project || !project.IsCompleted)
@@ -382,6 +464,7 @@ internal sealed class CustomerProjectForm : Form
 
         project.IsCompleted = false;
         StateChanged = true;
+        _projectStateChanged?.Invoke();
         RefreshProjects(project.CustomerId, project.Id);
     }
 

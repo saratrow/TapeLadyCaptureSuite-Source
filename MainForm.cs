@@ -1080,6 +1080,17 @@ internal sealed partial class MainForm : Form
             return;
         }
 
+        if (SelectedProject.IsCompleted)
+        {
+            MessageBox.Show(
+                this,
+                "This project is completed. Reopen Project in Customers / Projects before recording another tape.",
+                "Project Complete",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+
         if (!TryPrepareRecordingOutput(out var outputPath))
         {
             return;

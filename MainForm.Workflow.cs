@@ -804,7 +804,7 @@ internal sealed partial class MainForm
         if (customerId.HasValue)
         {
             foreach (var project in _projects
-                         .Where(project => project.CustomerId == customerId.Value)
+                         .Where(project => project.CustomerId == customerId.Value && !project.IsCompleted)
                          .OrderByDescending(project => project.DropOffDate))
             {
                 _projectCombo.Items.Add(project);
@@ -835,7 +835,7 @@ internal sealed partial class MainForm
             return;
         }
 
-        using var manager = new CustomerProjectForm(_customers, _projects, customer, null, chooseNewProjectDate: true);
+        using var manager = new CustomerProjectForm(_customers, _projects, _historyItems, customer, null, chooseNewProjectDate: true);
         DialogResult result = manager.ShowDialog(this);
         if (manager.StateChanged)
         {
@@ -894,8 +894,10 @@ internal sealed partial class MainForm
         using var manager = new CustomerProjectForm(
             _customers,
             _projects,
+            _historyItems,
             SelectedCustomer,
-            SelectedProject);
+            SelectedProject,
+            projectStateChanged: RefreshAfterProjectStateChange);
         var result = manager.ShowDialog(this);
 
         if (manager.StateChanged)
@@ -913,6 +915,19 @@ internal sealed partial class MainForm
         {
             RefreshCustomerProjectSelectors(SelectedCustomer?.Id, SelectedProject?.Id);
         }
+    }
+
+    private void RefreshAfterProjectStateChange()
+    {
+        Guid? customerId = SelectedCustomer?.Id;
+        Guid? projectId = SelectedProject?.Id;
+        if (projectId.HasValue && _projects.Any(project => project.Id == projectId.Value && project.IsCompleted))
+        {
+            projectId = null;
+        }
+
+        PersistWorkflowState();
+        RefreshCustomerProjectSelectors(customerId, projectId);
     }
 
     private void MigrateLegacyOwnership()

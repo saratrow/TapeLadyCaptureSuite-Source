@@ -17,6 +17,7 @@ internal sealed class CustomerProject
     public DateTime DropOffDate { get; set; } = DateTime.Today;
     public string? Name { get; set; }
     public bool IsCompleted { get; set; }
+    public DateTime? CompletedAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.Now;
 
     public string DisplayName => string.IsNullOrWhiteSpace(Name)
