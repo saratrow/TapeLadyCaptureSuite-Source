@@ -13,6 +13,7 @@ internal sealed class CustomerProjectForm : Form
     private readonly ListBox _projectList = new();
     private readonly Label _deliverySizeLabel = new();
     private readonly Button _newCustomerButton = new();
+    private readonly Button _deleteCustomerButton = new();
     private readonly Button _newProjectButton = new();
     private readonly Button _renameProjectButton = new();
     private readonly Button _completeProjectButton = new();
@@ -97,7 +98,9 @@ internal sealed class CustomerProjectForm : Form
 
         var customerButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
         ConfigureButton(_newCustomerButton, "New Customer");
+        ConfigureButton(_deleteCustomerButton, "Delete Customer");
         customerButtons.Controls.Add(_newCustomerButton);
+        customerButtons.Controls.Add(_deleteCustomerButton);
         root.Controls.Add(customerButtons, 0, 2);
 
         var projectButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
@@ -125,8 +128,10 @@ internal sealed class CustomerProjectForm : Form
             {
                 RefreshProjects(customer.Id, null);
             }
+            UpdateCustomerActions();
         };
         _newCustomerButton.Click += (_, _) => AddCustomer();
+        _deleteCustomerButton.Click += (_, _) => DeleteCustomer();
         _newProjectButton.Click += (_, _) => AddProject();
         _renameProjectButton.Click += (_, _) => RenameProject();
         _completeProjectButton.Click += (_, _) => CompleteProject();
@@ -144,6 +149,7 @@ internal sealed class CustomerProjectForm : Form
                 eventArgs.Value = $"{project.DisplayName} - Completed";
             }
         };
+        UpdateCustomerActions();
         UpdateProjectActions();
     }
 
@@ -218,6 +224,23 @@ internal sealed class CustomerProjectForm : Form
         UpdateDeliverySize(project);
     }
 
+    private void UpdateCustomerActions()
+    {
+        _deleteCustomerButton.Enabled = _customerList.SelectedItem is Customer;
+    }
+
+    private (List<CustomerProject> Projects, List<CaptureHistoryItem> History) GetCustomerRecords(Customer customer)
+    {
+        var projects = _projects
+            .Where(project => project.CustomerId == customer.Id)
+            .ToList();
+        var projectIds = projects.Select(project => project.Id).ToHashSet();
+        var history = _historyItems
+            .Where(item => item.ProjectId.HasValue && projectIds.Contains(item.ProjectId.Value))
+            .ToList();
+        return (projects, history);
+    }
+
     private void UpdateDeliverySize(CustomerProject? project)
     {
         if (project is null)
@@ -266,6 +289,72 @@ internal sealed class CustomerProjectForm : Form
         StateChanged = true;
         RefreshCustomers(customer.Id);
         RefreshProjects(customer.Id, project.Id);
+    }
+
+    private void DeleteCustomer()
+    {
+        if (_customerList.SelectedItem is not Customer customer)
+        {
+            return;
+        }
+
+        var records = GetCustomerRecords(customer);
+        if (!ConfirmDeleteCustomer(customer, records.Projects.Count, records.History.Count))
+        {
+            return;
+        }
+
+        Customer? currentCustomer = _customers.FirstOrDefault(item => item.Id == customer.Id);
+        if (currentCustomer is null)
+        {
+            return;
+        }
+
+        records = GetCustomerRecords(currentCustomer);
+        var projectIds = records.Projects.Select(project => project.Id).ToHashSet();
+        _historyItems.RemoveAll(item => item.ProjectId.HasValue && projectIds.Contains(item.ProjectId.Value));
+        _projects.RemoveAll(project => project.CustomerId == currentCustomer.Id);
+        _customers.Remove(currentCustomer);
+        SelectedCustomer = null;
+        SelectedProject = null;
+        StateChanged = true;
+        _projectStateChanged?.Invoke();
+        RefreshCustomers(null);
+        _projectList.Items.Clear();
+        UpdateCustomerActions();
+        UpdateProjectActions();
+    }
+
+    private bool ConfirmDeleteCustomer(Customer customer, int projectCount, int historyCount)
+    {
+        using var dialog = new Form
+        {
+            Text = "Delete Customer",
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(500, 205),
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            BackColor = Color.FromArgb(34, 36, 39),
+            ForeColor = Color.WhiteSmoke
+        };
+        var message = new Label
+        {
+            Text = $"Customer: {customer.FullName}\nProjects to remove: {projectCount}\nHistory records to remove: {historyCount}\n\n" +
+                (historyCount > 0
+                    ? "This customer has recording history in TLCS.\n\nDeleting this customer will permanently remove the customer, their projects, and their Capture History records from TLCS.\n\nNO video files, folders, Originals, or USB files will be deleted."
+                    : "This removes only the customer and project records from TLCS. No files or folders will be deleted."),
+            Location = new Point(16, 16),
+            Size = new Size(468, 140),
+            ForeColor = Color.WhiteSmoke
+        };
+        var confirm = new Button { Text = "Delete Customer", Location = new Point(282, 159), Size = new Size(120, 30) };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(408, 159), Size = new Size(76, 30) };
+        confirm.Click += (_, _) => dialog.DialogResult = DialogResult.Yes;
+        dialog.Controls.AddRange([message, confirm, cancel]);
+        dialog.AcceptButton = confirm;
+        dialog.CancelButton = cancel;
+        return dialog.ShowDialog(this) == DialogResult.Yes;
     }
 
     private void AddProject()

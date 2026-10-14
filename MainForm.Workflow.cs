@@ -988,16 +988,21 @@ internal sealed partial class MainForm
 
     private void ShowCustomerProjectManager()
     {
+        bool statePersistedByCallback = false;
         using var manager = new CustomerProjectForm(
             _customers,
             _projects,
             _historyItems,
             SelectedCustomer,
             SelectedProject,
-            projectStateChanged: RefreshAfterProjectStateChange);
+            projectStateChanged: () =>
+            {
+                statePersistedByCallback = true;
+                RefreshAfterProjectStateChange();
+            });
         var result = manager.ShowDialog(this);
 
-        if (manager.StateChanged)
+        if (manager.StateChanged && !statePersistedByCallback)
         {
             PersistWorkflowState();
         }
@@ -1018,7 +1023,12 @@ internal sealed partial class MainForm
     {
         Guid? customerId = SelectedCustomer?.Id;
         Guid? projectId = SelectedProject?.Id;
-        if (projectId.HasValue && (!_projects.Any(project => project.Id == projectId.Value) ||
+        if (customerId.HasValue && !_customers.Any(customer => customer.Id == customerId.Value))
+        {
+            customerId = null;
+            projectId = null;
+        }
+        else if (projectId.HasValue && (!_projects.Any(project => project.Id == projectId.Value) ||
                                    _projects.Any(project => project.Id == projectId.Value && project.IsCompleted)))
         {
             projectId = null;
@@ -1026,6 +1036,7 @@ internal sealed partial class MainForm
 
         PersistWorkflowState();
         RefreshCustomerProjectSelectors(customerId, projectId);
+        RefreshHistoryList();
     }
 
     private void MigrateLegacyOwnership()
