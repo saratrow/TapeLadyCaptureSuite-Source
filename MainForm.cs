@@ -282,9 +282,9 @@ internal sealed partial class MainForm : Form
         AddJobLabel(panel, "Tape Title", 4);
 
         ConfigureCombo(_customerText);
-        _customerText.DropDownStyle = ComboBoxStyle.DropDown;
-        _customerText.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
-        _customerText.AutoCompleteSource = AutoCompleteSource.ListItems;
+        _customerText.DropDownStyle = ComboBoxStyle.DropDownList;
+        _customerText.AutoCompleteMode = AutoCompleteMode.None;
+        _customerText.AutoCompleteSource = AutoCompleteSource.None;
         ConfigureCombo(_projectCombo);
         _projectCombo.DropDownStyle = ComboBoxStyle.DropDownList;
         ConfigureTextBox(_tapeLabelText);
@@ -665,7 +665,7 @@ internal sealed partial class MainForm : Form
         _browseButton.Click += (_, _) => BrowseForSaveFolder();
         _manageCustomersButton.Click += (_, _) => ShowCustomerProjectManager();
         _nextUnlabeledButton.Click += (_, _) => UseNextUnlabeledTitle();
-        _customerText.SelectionChangeCommitted += (_, _) => SelectCustomer(_customerText.SelectedItem as Customer);
+        _customerText.SelectionChangeCommitted += (_, _) => SelectCustomerFromCombo();
         _projectCombo.SelectionChangeCommitted += (_, _) => SelectProjectFromCombo();
 
         _previewService.FrameReady += PreviewService_FrameReady;

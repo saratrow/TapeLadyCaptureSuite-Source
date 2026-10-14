@@ -21,12 +21,14 @@ internal sealed partial class MainForm
     private readonly Button _openFolderButton = new();
     private readonly Button _editDetailsButton = new();
     private readonly Button _discardCaptureButton = new();
+    private readonly Button _resolveMissingFileButton = new();
     private readonly Button _reviewVideosButton = new();
     private readonly Label _diskSpaceLabel = new();
     private QueueItem? _activeQueueItem;
     private ReviewTrimForm? _reviewTrimForm;
     private int _historySortColumn = 1;
     private bool _historySortDescending = true;
+    private readonly NewCustomerChoice _newCustomerChoice = new();
     private readonly NewProjectChoice _newProjectChoice = new();
 
     private Control BuildWorkflowPanel()
@@ -130,7 +132,7 @@ internal sealed partial class MainForm
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
 
         var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -161,16 +163,20 @@ internal sealed partial class MainForm
         _historyList.ColumnClick += (_, eventArgs) => ChangeHistorySort(eventArgs.Column);
         root.Controls.Add(_historyList, 0, 1);
 
-        var buttons = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 };
-        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
-        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
-        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.34F));
+        var buttons = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        buttons.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        buttons.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
         ConfigureWorkflowButton(_openFileButton, "Play File");
         ConfigureWorkflowButton(_openFolderButton, "Open Folder");
         ConfigureWorkflowButton(_editDetailsButton, "Edit Details");
+        ConfigureWorkflowButton(_resolveMissingFileButton, "Mark Missing as Discarded");
+        _resolveMissingFileButton.Enabled = false;
         buttons.Controls.Add(_openFileButton, 0, 0);
         buttons.Controls.Add(_openFolderButton, 1, 0);
-        buttons.Controls.Add(_editDetailsButton, 2, 0);
+        buttons.Controls.Add(_editDetailsButton, 0, 1);
+        buttons.Controls.Add(_resolveMissingFileButton, 1, 1);
         root.Controls.Add(buttons, 0, 2);
         return root;
     }
@@ -212,7 +218,8 @@ internal sealed partial class MainForm
         _openFolderButton.Click += (_, _) => OpenSelectedHistoryFile(true);
         _editDetailsButton.Click += (_, _) => EditSelectedHistoryDetails();
         _discardCaptureButton.Click += (_, _) => DiscardSelectedCapture();
-        _historyList.DoubleClick += (_, _) => OpenSelectedHistoryFile(false);
+        _resolveMissingFileButton.Click += (_, _) => MarkSelectedMissingFileAsDiscarded();
+        _historyList.SelectedIndexChanged += (_, _) => BeginInvoke((MethodInvoker)UpdateHistoryActions);
         _reviewVideosButton.Click += (_, _) => ShowReviewVideos();
         _saveFolderText.TextChanged += (_, _) => UpdateDiskSpaceLabel();
     }
@@ -437,6 +444,13 @@ internal sealed partial class MainForm
         }
         _historyList.EndUpdate();
         UpdateReviewVideosButton();
+        UpdateHistoryActions();
+    }
+
+    private void UpdateHistoryActions()
+    {
+        var item = SelectedHistoryItem();
+        _resolveMissingFileButton.Enabled = item is not null && IsMissingFile(item);
     }
 
     private void ChangeHistorySort(int column)
@@ -482,7 +496,7 @@ internal sealed partial class MainForm
 
     private static string HistoryStatusText(CaptureHistoryItem item)
     {
-        if (item.ReviewStatus == CaptureReviewStatus.NeedsReview && !File.Exists(item.OutputPath))
+        if (IsMissingFile(item))
         {
             return "Missing File";
         }
@@ -496,6 +510,9 @@ internal sealed partial class MainForm
             _ => item.ReviewStatus.ToString()
         };
     }
+
+    private static bool IsMissingFile(CaptureHistoryItem item) =>
+        item.ReviewStatus == CaptureReviewStatus.NeedsReview && !File.Exists(item.OutputPath);
 
     private void UpdateReviewVideosButton()
     {
@@ -614,6 +631,57 @@ internal sealed partial class MainForm
         {
             MessageBox.Show(this, ex.Message, "Unable to Discard Capture", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private void MarkSelectedMissingFileAsDiscarded()
+    {
+        var item = SelectedHistoryItem();
+        if (item is null || !IsMissingFile(item))
+        {
+            return;
+        }
+
+        if (!ConfirmMarkMissingFileAsDiscarded(item))
+        {
+            return;
+        }
+
+        item.ReviewStatus = CaptureReviewStatus.Discarded;
+        item.DiscardedAt = DateTime.Now;
+        PersistWorkflowState();
+        RefreshHistoryList();
+    }
+
+    private bool ConfirmMarkMissingFileAsDiscarded(CaptureHistoryItem item)
+    {
+        using var dialog = new Form
+        {
+            Text = "Mark Missing as Discarded",
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(550, 250),
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            BackColor = Color.FromArgb(34, 36, 39),
+            ForeColor = Color.WhiteSmoke
+        };
+        var message = new Label
+        {
+            Text = "The saved MP4 for this recording cannot be found.\n\n" +
+                "Only mark this recording Discarded if you know the missing video does not need to be recovered or recaptured.\n\n" +
+                $"Customer: {item.Customer}\nProject: {item.ProjectName}\nTape: {item.TapeLabel}\n\n" +
+                "This will keep the Capture History record but mark it Discarded.",
+            Location = new Point(16, 16),
+            Size = new Size(518, 165),
+            ForeColor = Color.WhiteSmoke
+        };
+        var confirm = new Button { Text = "Mark as Discarded", Location = new Point(254, 202), Size = new Size(138, 30) };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(458, 202), Size = new Size(76, 30) };
+        confirm.Click += (_, _) => dialog.DialogResult = DialogResult.Yes;
+        dialog.Controls.AddRange([message, confirm, cancel]);
+        dialog.AcceptButton = confirm;
+        dialog.CancelButton = cancel;
+        return dialog.ShowDialog(this) == DialogResult.Yes;
     }
 
     private void EditSelectedHistoryDetails()
@@ -791,6 +859,7 @@ internal sealed partial class MainForm
         {
             _customerText.Items.Add(customer);
         }
+        _customerText.Items.Add(_newCustomerChoice);
         _customerText.EndUpdate();
 
         SelectComboItem<Customer>(_customerText, customerId, customer => customer.Id);
@@ -876,6 +945,34 @@ internal sealed partial class MainForm
         RefreshProjectSelector(customer?.Id, null);
     }
 
+    private void SelectCustomerFromCombo()
+    {
+        if (_customerText.SelectedItem is NewCustomerChoice)
+        {
+            ShowNewCustomerPrompt();
+            return;
+        }
+
+        SelectCustomer(_customerText.SelectedItem as Customer);
+    }
+
+    private void ShowNewCustomerPrompt()
+    {
+        Customer? customer = CustomerProjectForm.PromptForCustomer(_customers, out bool created);
+        if (customer is null)
+        {
+            RefreshCustomerProjectSelectors(null, null);
+            return;
+        }
+
+        if (created)
+        {
+            PersistWorkflowState();
+        }
+
+        RefreshCustomerProjectSelectors(customer.Id, null);
+    }
+
     private void SelectProject(CustomerProject? project)
     {
         if (project is null)
@@ -921,7 +1018,8 @@ internal sealed partial class MainForm
     {
         Guid? customerId = SelectedCustomer?.Id;
         Guid? projectId = SelectedProject?.Id;
-        if (projectId.HasValue && _projects.Any(project => project.Id == projectId.Value && project.IsCompleted))
+        if (projectId.HasValue && (!_projects.Any(project => project.Id == projectId.Value) ||
+                                   _projects.Any(project => project.Id == projectId.Value && project.IsCompleted)))
         {
             projectId = null;
         }
@@ -999,6 +1097,11 @@ internal sealed partial class MainForm
         _queueList.Enabled = enabled;
         _notesText.Enabled = enabled;
         _discardCaptureButton.Enabled = enabled;
+    }
+
+    private sealed class NewCustomerChoice
+    {
+        public override string ToString() => "New Customer...";
     }
 
     private sealed class NewProjectChoice

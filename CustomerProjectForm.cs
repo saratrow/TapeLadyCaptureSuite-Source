@@ -1,4 +1,5 @@
 using TapeLadyCaptureSuite.Models;
+using TapeLadyCaptureSuite.Services;
 
 namespace TapeLadyCaptureSuite;
 
@@ -10,11 +11,14 @@ internal sealed class CustomerProjectForm : Form
     private readonly Action? _projectStateChanged;
     private readonly ListBox _customerList = new();
     private readonly ListBox _projectList = new();
+    private readonly Label _deliverySizeLabel = new();
     private readonly Button _newCustomerButton = new();
     private readonly Button _newProjectButton = new();
     private readonly Button _renameProjectButton = new();
     private readonly Button _completeProjectButton = new();
     private readonly Button _reopenProjectButton = new();
+    private readonly Button _prepareDeliveryButton = new();
+    private readonly Button _deleteEmptyProjectButton = new();
     private readonly Button _resumeButton = new();
     private readonly bool _chooseNewProjectDate;
 
@@ -79,7 +83,17 @@ internal sealed class CustomerProjectForm : Form
         ConfigureList(_customerList);
         ConfigureList(_projectList);
         root.Controls.Add(_customerList, 0, 1);
-        root.Controls.Add(_projectList, 1, 1);
+        var projectPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        projectPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        projectPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+        projectPanel.Controls.Add(_projectList, 0, 0);
+        _deliverySizeLabel.Dock = DockStyle.Fill;
+        _deliverySizeLabel.BorderStyle = BorderStyle.FixedSingle;
+        _deliverySizeLabel.ForeColor = Color.Silver;
+        _deliverySizeLabel.Padding = new Padding(6, 4, 6, 4);
+        _deliverySizeLabel.Text = "Select a project to view delivery size.";
+        projectPanel.Controls.Add(_deliverySizeLabel, 0, 1);
+        root.Controls.Add(projectPanel, 1, 1);
 
         var customerButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
         ConfigureButton(_newCustomerButton, "New Customer");
@@ -89,12 +103,16 @@ internal sealed class CustomerProjectForm : Form
         var projectButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
         ConfigureButton(_resumeButton, "Use Project");
         ConfigureButton(_reopenProjectButton, "Reopen Project");
+        ConfigureButton(_prepareDeliveryButton, "Prepare Delivery");
         ConfigureButton(_completeProjectButton, "Mark Project Complete");
+        ConfigureButton(_deleteEmptyProjectButton, "Delete Empty Project");
         ConfigureButton(_renameProjectButton, "Rename");
         ConfigureButton(_newProjectButton, "New Project");
         projectButtons.Controls.Add(_resumeButton);
         projectButtons.Controls.Add(_reopenProjectButton);
+        projectButtons.Controls.Add(_prepareDeliveryButton);
         projectButtons.Controls.Add(_completeProjectButton);
+        projectButtons.Controls.Add(_deleteEmptyProjectButton);
         projectButtons.Controls.Add(_renameProjectButton);
         projectButtons.Controls.Add(_newProjectButton);
         root.Controls.Add(projectButtons, 1, 2);
@@ -113,6 +131,8 @@ internal sealed class CustomerProjectForm : Form
         _renameProjectButton.Click += (_, _) => RenameProject();
         _completeProjectButton.Click += (_, _) => CompleteProject();
         _reopenProjectButton.Click += (_, _) => ReopenProject();
+        _prepareDeliveryButton.Click += (_, _) => PrepareDelivery();
+        _deleteEmptyProjectButton.Click += (_, _) => DeleteEmptyProject();
         _resumeButton.Click += (_, _) => ResumeProject();
         _projectList.DoubleClick += (_, _) => ResumeProject();
         _projectList.SelectedIndexChanged += (_, _) => UpdateProjectActions();
@@ -185,12 +205,32 @@ internal sealed class CustomerProjectForm : Form
 
     private void UpdateProjectActions()
     {
-        bool isCompleted = _projectList.SelectedItem is CustomerProject { IsCompleted: true };
-        bool isActive = _projectList.SelectedItem is CustomerProject { IsCompleted: false };
+        CustomerProject? project = _projectList.SelectedItem as CustomerProject;
+        bool isCompleted = project is { IsCompleted: true };
+        bool isActive = project is { IsCompleted: false };
         _completeProjectButton.Visible = isActive;
         _completeProjectButton.Enabled = isActive;
         _reopenProjectButton.Visible = isCompleted;
         _reopenProjectButton.Enabled = isCompleted;
+        _prepareDeliveryButton.Visible = isCompleted;
+        _prepareDeliveryButton.Enabled = isCompleted;
+        _deleteEmptyProjectButton.Enabled = project is not null && !_historyItems.Any(item => item.ProjectId == project.Id);
+        UpdateDeliverySize(project);
+    }
+
+    private void UpdateDeliverySize(CustomerProject? project)
+    {
+        if (project is null)
+        {
+            _deliverySizeLabel.Text = "Select a project to view delivery size.";
+            return;
+        }
+
+        DeliveryPlan plan = ProjectDeliveryService.BuildPlan(project, _historyItems);
+        _deliverySizeLabel.Text =
+            $"Finished Videos: {plan.Candidates.Count}\n" +
+            $"Delivery Size: {ProjectDeliveryService.FormatGigabytes(plan.PayloadBytes)}\n" +
+            $"Recommended USB: {ProjectDeliveryService.GetRecommendedUsbCapacity(plan.PayloadBytes)}";
     }
 
     private static void SelectItem<T>(ListBox list, Guid? id, Func<T, Guid> getId)
@@ -212,18 +252,10 @@ internal sealed class CustomerProjectForm : Form
 
     private void AddCustomer()
     {
-        var name = PromptForText("New Customer", "Full name:", string.Empty);
-        if (string.IsNullOrWhiteSpace(name))
+        Customer? customer = PromptForCustomer(_customers, out _);
+        if (customer is null)
         {
             return;
-        }
-
-        var existing = _customers.FirstOrDefault(customer =>
-            string.Equals(customer.FullName, name.Trim(), StringComparison.OrdinalIgnoreCase));
-        var customer = existing ?? new Customer { FullName = name.Trim() };
-        if (existing is null)
-        {
-            _customers.Add(customer);
         }
 
         var project = CreateProject(customer);
@@ -450,6 +482,87 @@ internal sealed class CustomerProjectForm : Form
         RefreshProjects(project.CustomerId, project.Id);
     }
 
+    private void PrepareDelivery()
+    {
+        if (_projectList.SelectedItem is not CustomerProject project || !project.IsCompleted)
+        {
+            return;
+        }
+
+        Customer? customer = _customers.FirstOrDefault(item => item.Id == project.CustomerId);
+        if (customer is null)
+        {
+            MessageBox.Show(this, "The customer for this project is no longer available.", "Prepare Delivery", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        using var delivery = new ProjectDeliveryForm(customer, project, _historyItems);
+        if (delivery.ShowDialog(this) != DialogResult.OK || !delivery.DeliverySucceeded)
+        {
+            return;
+        }
+
+        project.DeliveredAt = DateTime.Now;
+        StateChanged = true;
+        _projectStateChanged?.Invoke();
+        RefreshProjects(project.CustomerId, project.Id);
+        MessageBox.Show(
+            this,
+            $"{delivery.DeliveredFileCount} video(s) copied and verified successfully to {delivery.DestinationDrive}.\n\nUse Windows Safely Remove Hardware before unplugging the USB.",
+            "Delivery Verified",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+    }
+
+    private void DeleteEmptyProject()
+    {
+        if (_projectList.SelectedItem is not CustomerProject project || _historyItems.Any(item => item.ProjectId == project.Id))
+        {
+            return;
+        }
+
+        Customer? customer = _customers.FirstOrDefault(item => item.Id == project.CustomerId);
+        if (!ConfirmDeleteEmptyProject(customer, project))
+        {
+            return;
+        }
+
+        _projects.Remove(project);
+        StateChanged = true;
+        _projectStateChanged?.Invoke();
+        RefreshProjects(project.CustomerId, null);
+    }
+
+    private bool ConfirmDeleteEmptyProject(Customer? customer, CustomerProject project)
+    {
+        using var dialog = new Form
+        {
+            Text = "Delete Empty Project",
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(500, 205),
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            BackColor = Color.FromArgb(34, 36, 39),
+            ForeColor = Color.WhiteSmoke
+        };
+        var message = new Label
+        {
+            Text = $"Customer: {customer?.FullName ?? "Unknown Customer"}\nProject: {project.DisplayName}\n\n" +
+                "This project has no recording history and can be safely removed.\n\nDelete this empty project?",
+            Location = new Point(16, 16),
+            Size = new Size(468, 120),
+            ForeColor = Color.WhiteSmoke
+        };
+        var confirm = new Button { Text = "Delete Project", Location = new Point(298, 159), Size = new Size(104, 30) };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(408, 159), Size = new Size(76, 30) };
+        confirm.Click += (_, _) => dialog.DialogResult = DialogResult.Yes;
+        dialog.Controls.AddRange([message, confirm, cancel]);
+        dialog.AcceptButton = confirm;
+        dialog.CancelButton = cancel;
+        return dialog.ShowDialog(this) == DialogResult.Yes;
+    }
+
     private void ReopenProject()
     {
         if (_projectList.SelectedItem is not CustomerProject project || !project.IsCompleted)
@@ -485,6 +598,28 @@ internal sealed class CustomerProjectForm : Form
         SelectedProject = project;
         DialogResult = DialogResult.OK;
         Close();
+    }
+
+    internal static Customer? PromptForCustomer(List<Customer> customers, out bool created)
+    {
+        created = false;
+        var name = PromptForText("New Customer", "Full name:", string.Empty);
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return null;
+        }
+
+        var existing = customers.FirstOrDefault(customer =>
+            string.Equals(customer.FullName, name.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+        {
+            return existing;
+        }
+
+        var customer = new Customer { FullName = name.Trim() };
+        customers.Add(customer);
+        created = true;
+        return customer;
     }
 
     private static string? PromptForText(string title, string label, string initialValue)
